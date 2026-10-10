@@ -1,0 +1,55 @@
+# Gradle and IDE state
+.gradle/
+.idea/
+.vs/
+.settings/
+*.iml
+*.ipr
+*.iws
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+.classpath
+.project
+
+# Build outputs
+build/
+out/
+obj/
+x64/
+Win32/
+Debug/
+Release/
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+*.ptx
+*.cubin
+*.fatbin
+
+# Local Minecraft instances, logs and trained checkpoints
+run/
+logs/
+*.log
+models/
+online-*.bin
+
+# Local credentials and machine-specific secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

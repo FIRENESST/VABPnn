@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "vabpnn",
+  "version": "${version}",
+  "name": "VABPnn Continuous GPU Capture",
+  "description": "Continuous FBO-to-CUDA capture, bounded device frame pool and asynchronous GPU operators for Minecraft 26.1. Windows x64 / NVIDIA.",
+  "authors": ["VABPnn"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["cn.vabpnn.mod.VabpnnMod"],
+    "client": ["cn.vabpnn.mod.client.VabpnnClient"]
+  },
+  "mixins": [
+    "vabpnn.mixins.json",
+    {
+      "config": "vabpnn.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "${minecraft_version}",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

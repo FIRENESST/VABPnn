@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "vabpnn-action-test",
+  "version": "1.0.0",
+  "name": "VABPnn Minecraft input acceptance tests",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": [
+      "cn.vabpnn.mod.client.capture.MinecraftActionsGameTest"
+    ]
+  }
+}

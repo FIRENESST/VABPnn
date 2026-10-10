@@ -1,0 +1,9 @@
+{
+  "required": true,
+  "package": "cn.vabpnn.mod.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": ["MinecraftServerMixin"],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "required": true,
+  "package": "cn.vabpnn.mod.mixin.client",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "DesktopScopeMixin",
+    "MinecraftClientMixin",
+    "GameRendererMixin",
+    "KeyboardHandlerMixin",
+    "KeyboardHandlerInvoker",
+    "MouseHandlerAccess",
+    "HumanMouseMixin",
+    "KeyMappingAccess",
+    "ToggleKeyMappingAccess"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

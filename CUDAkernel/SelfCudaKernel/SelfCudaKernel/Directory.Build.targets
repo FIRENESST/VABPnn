@@ -1,0 +1,20 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- MSBuild loads this file automatically, independently of VS project saves. -->
+  <PropertyGroup Condition="'$(CudaToolkitDir)' != ''">
+    <IncludePath>$(CudaToolkitIncludeDir);$(IncludePath)</IncludePath>
+    <LibraryPath>$(CudaToolkitLibDir);$(LibraryPath)</LibraryPath>
+    <!-- Keeping intermediates makes nvcc pass absolute paths to cl.exe.
+         Use an ASCII location even when the project lives in a Chinese directory.
+         This root can be overridden if TEMP itself contains non-ASCII characters. -->
+    <CudaKeepRoot Condition="'$(CudaKeepRoot)' == ''">$(TEMP)\SelfCudaKernel-07f1945b</CudaKeepRoot>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <CudaCompile>
+      <!-- nvcc fails on the non-ASCII parent directory in absolute paths. -->
+      <CompileOut>$(IntDir)%(Filename)%(Extension).obj</CompileOut>
+      <KeepDir>$(CudaKeepRoot)\$(Platform)\$(Configuration)</KeepDir>
+      <DriverApiCommandLineTemplate>%(BaseCommandLineTemplate) [Defines] [CompileOut] "%(Identity)"</DriverApiCommandLineTemplate>
+      <RuntimeApiCommandLineTemplate>%(BaseCommandLineTemplate) [HostDebugInfo] [Emulation] [Defines] %(HostCommandLineTemplate) [CompileOut] "%(Identity)"</RuntimeApiCommandLineTemplate>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+</Project>
