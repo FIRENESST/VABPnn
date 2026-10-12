@@ -59,6 +59,8 @@ public final class NativeCudaBridge implements AutoCloseable {
     public void position(long nanos,long epoch,double x,double y,double z) { nPosition(handle,nanos,epoch,x,y,z); }
     /** Completed frame's coordinate timestamp/epoch/AdamW steps/validity/XYZ double bit patterns. */
     public void readPosition(long[] status) { nPositionStatus(handle,status); }
+    /** Elapsed minutes (double bits), observed minute buckets, minute AdamW steps, frame and Bayesian mouse steps. */
+    public void readTime(long[] status) { nTimeStatus(handle,status); }
     public void checkpoint(Path path) { nCheckpoint(handle, path.toAbsolutePath().toString(), false); }
     /** Returns a request serial; completion is published only after the worker finishes saving. */
     public long saveCheckpoint() {
@@ -73,10 +75,16 @@ public final class NativeCudaBridge implements AutoCloseable {
     public void readDecision(long[] status) { nDecision(handle,status); }
     public void configureBlocks(int enabled,int communication) { nBlocks(handle,enabled,communication); }
     public void readBlocks(long[] status) { nBlockStatus(handle,status); }
+    public void configureMemes(int enabled) { nMemes(handle,enabled); }
+    public void readMemes(long[] status) { nMemeStatus(handle,status); }
     public void readTiming(long[] status) { nTiming(handle, status); }
     public String checkpointMessage() { return nCheckpointText(handle); }
     public void resetDecision(long minimumFrame) { nResetDecision(handle, minimumFrame); }
 
+    public void memeScopeEnabled(boolean enabled,int tile) { nMemeScopeEnabled(handle,enabled,tile); }
+    public void readMemeScope(long[] meta,float[] values,int[] discrete,long[] identities) {
+        nMemeScope(handle,meta,values,discrete,identities);
+    }
     public void scopeEnabled(boolean enabled,int tile) { nScopeEnabled(handle,enabled,tile); }
     public void readScope(long[] meta,float[] values,int[] discrete) { nScope(handle,meta,values,discrete); }
 
@@ -97,14 +105,19 @@ public final class NativeCudaBridge implements AutoCloseable {
         }
     }
 
+    private static native void nMemeScopeEnabled(long handle,boolean enabled,int tile);
+    private static native void nMemeScope(long handle,long[] meta,float[] values,int[] discrete,long[] identities);
     private static native void nScopeEnabled(long handle,boolean enabled,int tile);
     private static native void nScope(long handle,long[] meta,float[] values,int[] discrete);
     private static native void nBlocks(long handle,int enabled,int communication);
     private static native void nBlockStatus(long handle,long[] status);
+    private static native void nMemes(long handle,int enabled);
+    private static native void nMemeStatus(long handle,long[] status);
     private static native void nTiming(long handle, long[] status);
     private static native void nDemo(long handle, long[] values, double[] motion);
     private static native void nPosition(long handle,long nanos,long epoch,double x,double y,double z);
     private static native void nPositionStatus(long handle,long[] status);
+    private static native void nTimeStatus(long handle,long[] status);
     private static native void nCheckpoint(long handle, String path, boolean save);
     private static native void nTraining(long handle, long[] status);
     private static native void nDecision(long handle,long[] status);
@@ -123,4 +136,5 @@ public final class NativeCudaBridge implements AutoCloseable {
     private static native String nText(long handle, boolean error);
     private static native void nClose(long handle);
 }
+
 

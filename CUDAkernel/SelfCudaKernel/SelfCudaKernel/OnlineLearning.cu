@@ -7,11 +7,7 @@
 namespace {
 using namespace vabpnn;
 constexpr int WheelFeatures = DecisionWidth + VoteCount + 1;
-struct Persistent {
-    DecisionParameters first, second;
-    float wheel[WheelFeatures], wheelFirst[WheelFeatures], wheelSecond[WheelFeatures];
-    OnlineOutput output;
-};
+using Persistent=OnlinePersistent;
 struct Cache {
     DemoSample previous;
     std::uint64_t nanos, frame;
@@ -44,9 +40,9 @@ __global__ void prepare(const DemoSample* now, Cache* c, Persistent* state,
     const double wheel = now->wheel-previous.wheel;
     if (!isfinite(dx) || !isfinite(dy) || !isfinite(wheel)) { ++state->output.rejected; return; }
     // Keyboard holds and physical left/right holds survive between edge events.
-    std::uint32_t label = now->heldKeys & 0x119f;
-    const int keyIndex[6] = {0,1,2,3,4,12};
-    for (int k=0;k<6;++k) {
+    std::uint32_t label = now->heldKeys & 0x719f;
+    const int keyIndex[8] = {0,1,2,3,4,12,13,14};
+    for (int k=0;k<8;++k) {
         if (now->keyHeldNanos[k] < previous.keyHeldNanos[k]) { ++state->output.rejected; return; }
         // Any meaningful hold within the interval also teaches a short keyboard pulse.
         if ((now->keyHeldNanos[k]-previous.keyHeldNanos[k])*1e-9 > dt*0.1) label |= 1u<<keyIndex[k];
@@ -106,6 +102,8 @@ __global__ void trainPolicy(DecisionParameters* p, DecisionPositionAdapter* posi
         threshold[tid]=(out->threshold[tid]-(y ? 0.25f:0.75f))/VoteCount;
     }
     if(tid==0) {
+        // Migrated unused k slots cannot override an old policy before genuine supervision.
+        p->enabledKChoices=fmaxf(p->enabledKChoices,static_cast<float>(__popc(c->label)+1));
         const float step=static_cast<float>(state->output.decisionSteps);
         bias1=1-powf(0.9f,step); bias2=1-powf(0.999f,step);
         trainPosition=out->positionValid;
@@ -270,6 +268,13 @@ void vabpnnSetDemoSample(VabpnnOnlineModel* m,const vabpnn::DemoSample* sample,c
 void vabpnnLearnPreviousDemo(const VabpnnGpuFrame& frame) {
     auto* m=frame.onlineModel;
     if(!m || !frame.jepaModel || !frame.decisionModel || !frame.neuronModel) return;
+    if(frame.evaluationMode) {
+        // Inference permissions must still update; no feedback, optimizer, mutation or cache write.
+        configureInference<<<1,1,0,frame.stream>>>(m->sample,vabpnnMutableJepaConfig(frame.jepaModel,frame.stream));
+        vabpnnPrepareBlockControllers(frame);
+        check(cudaGetLastError(),"configure frozen evaluation inference");
+        return;
+    }
     auto j=vabpnnJepaModelView(frame.jepaModel);
     auto* target=vabpnnMutableJepaMotionTarget(frame.jepaModel,frame.stream);
     prepare<<<1,1,0,frame.stream>>>(m->sample,m->cache,m->persistent,j.output,j.config,
@@ -279,6 +284,8 @@ void vabpnnLearnPreviousDemo(const VabpnnGpuFrame& frame) {
     vabpnnLearnBlockControllers(frame,&m->cache->policyActive,&m->cache->label);
     // Generate controls BEFORE pixel learning: its learning-rate output affects the observation later scored.
     vabpnnPrepareBlockControllers(frame);
+    vabpnnTrainBayesianMotion(frame.decisionModel,&m->cache->motionActive,&m->cache->rateX,&m->cache->rateY,frame.stream);
+    vabpnnTrainMinuteDecision(frame.decisionModel,&m->cache->policyActive,&m->cache->label,frame.stream);
     trainPolicy<<<1,256,0,frame.stream>>>(vabpnnMutableDecisionParameters(frame.decisionModel,frame.stream),
         vabpnnMutablePositionAdapter(frame.decisionModel,frame.stream),
         vabpnnDecisionModelView(frame.decisionModel).output,m->cache,m->persistent);

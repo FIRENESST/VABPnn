@@ -1,12 +1,13 @@
 #pragma once
 #include "GpuFrame.h"
 #include "JepaMotion.h"
+#include "TemporalDecision.h"
 #include "ModelSnapshot.h"
 struct VabpnnOnlineModel;
 namespace vabpnn {
 // Cumulative real inputs survive dropped frames. Java never fills these from the policy.
 struct DemoSample {
-    std::uint64_t epoch = 0, edge[4]{}, keyHeldNanos[6]{};
+    std::uint64_t epoch = 0, edge[4]{}, keyHeldNanos[8]{};
     double mouseX = 0, mouseY = 0, wheel = 0;
     // Action mask: keyboard holds plus LeftPress/RightPress while physically held.
     std::uint32_t heldKeys = 0, active = 0, modelControl = 0, pointerMode = 0;
@@ -16,6 +17,13 @@ struct OnlineOutput {
     float decisionLoss, wheelLoss;
     std::uint32_t lastLabel, valid;
 };
+// Kept explicit so 13-action checkpoints can be expanded without losing AdamW history.
+template<int Actions> struct OnlinePersistentT {
+    DecisionParametersT<Actions> first,second;
+    float wheel[DecisionWidth+Actions+1],wheelFirst[DecisionWidth+Actions+1],wheelSecond[DecisionWidth+Actions+1];
+    OnlineOutput output;
+};
+using OnlinePersistent=OnlinePersistentT<VoteCount>;
 }
 VabpnnOnlineModel* vabpnnCreateOnlineModel(cudaStream_t stream);
 void vabpnnDestroyOnlineModel(VabpnnOnlineModel* model) noexcept;
@@ -29,3 +37,4 @@ void vabpnnCacheDemoObservation(const VabpnnGpuFrame& frame);
 void vabpnnOnlineWheel(const VabpnnGpuFrame& frame, vabpnn::MotionProposal* proposal);
 void vabpnnResetOnlineHistory(VabpnnOnlineModel* model, cudaStream_t stream);
 std::size_t vabpnnOnlineCheckpointParts(VabpnnOnlineModel* model, vabpnn::ModelPart* parts);
+

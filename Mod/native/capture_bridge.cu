@@ -10,7 +10,9 @@
 #include "OnlineLearning.h"
 #include "SpikeConnections.h"
 #include "NetworkScope.h"
+#include "MemeState.h"
 #include "model_checkpoint.h"
+#include "action_checkpoint_migration.h"
 #include <cstring>
 #include <cmath>
 #include <array>
@@ -63,7 +65,7 @@ struct TextureSlot {
 };
 struct FrameSlot {
     int state = FRAME_FREE, textureIndex = -1;
-    bool hasScope=false;
+    bool hasScope=false,hasMemeScope=false;
     vabpnn::DemoSample demo;
     vabpnn::PlayerPositionSample position;
     unsigned char* rgba = nullptr;
@@ -101,6 +103,10 @@ public:
     vabpnn::BlockCounters* pendingBlocks=nullptr;
     vabpnn::BlockCounters latestBlocks{};
     std::uint64_t latestBlockFrame=0;
+    vabpnn::MemeCounters* pendingMemes=nullptr;
+    vabpnn::MemeCounters latestMemes{};
+    int requestedMemes=-1;
+    std::atomic<bool> memesChanged{false};
     int requestedBlocks=-1,requestedCommunication=-1;
     std::atomic<bool> blocksChanged{false};
     std::atomic<bool> scopeEnabled{false};
@@ -110,6 +116,14 @@ public:
     std::array<jlong,24> scopeMeta{};
     std::mutex scopeMutex;
     std::chrono::steady_clock::time_point nextScope{};
+    std::atomic<bool> memeScopeEnabled{false};
+    std::atomic<int> memeScopeTile{32*120+60};
+    vabpnn::MemeScopeTelemetry *memeScopeDevice=nullptr,*memeScopePending=nullptr;
+    vabpnn::MemeScopeTelemetry memeScopeLatest{};
+    vabpnn::MemeRelayTrace* memeTraceDevice=nullptr;
+    std::mutex memeScopeMutex;
+    std::chrono::steady_clock::time_point nextMemeScope{};
+    bool tracing=false; // Worker-owned enable edge; trace is never checkpointed.
     vabpnn::DemoSample latestDemo;
     vabpnn::PlayerPositionSample latestPosition;
     std::mutex demoMutex, checkpointMutex;
@@ -124,7 +138,7 @@ public:
     std::atomic<std::uint64_t> saveRequestSerial{0};
     std::uint64_t saveFinishedSerial=0; // Published with checkpoint status under checkpointMutex.
     bool checkpointOpened = false;
-    std::uint64_t lastSavedExamples = 0, lastSavedSelfSteps = 0;
+    std::uint64_t lastSavedExamples = 0, lastSavedSelfSteps = 0, lastSavedTopology = 0;
     std::chrono::steady_clock::time_point nextSave = std::chrono::steady_clock::now();
     vabpnn::ControlCommand* pendingControl = nullptr; // One pinned host command, worker-owned.
     vabpnn::ControlCommand latestControl{};
@@ -235,7 +249,7 @@ public:
         return current ? current->phase.load() : RETIRED;
     }
 private:
-    std::vector<vabpnn::ModelPart> checkpointParts(bool connections=true,bool position=true,bool blocks=true) {
+    std::vector<vabpnn::ModelPart> checkpointParts(bool connections=true,bool position=true,bool blocks=true,bool memes=true,bool placement=true,bool minutes=true) {
         std::vector<vabpnn::ModelPart> parts;
         parts.push_back({vabpnnMutableNeuronWeights(neuronModel,nullptr),vabpnn::ParameterCount});
         parts.push_back({vabpnnMutableDecisionParameters(decisionModel,nullptr),sizeof(vabpnn::DecisionParameters)});
@@ -253,6 +267,9 @@ private:
             parts.insert(parts.end(),extra,extra+count);
         }
         if(blocks) parts.push_back(vabpnnBlockCheckpointPart(vabpnnSpikeBlockModel(spikeModel)));
+        if(memes) parts.push_back(vabpnnMemeCheckpointPart(vabpnnBlockMemeModel(vabpnnSpikeBlockModel(spikeModel))));
+        if(placement) parts.push_back(vabpnnSpikePlacementCheckpointPart(spikeModel));
+        if(minutes) parts.push_back(vabpnnDecisionMinuteCheckpointPart(decisionModel));
         return parts;
     }
     void serviceBlockMode(cudaStream_t stream) {
@@ -266,6 +283,20 @@ private:
             enabled=requestedBlocks; mode=requestedCommunication;
             requestedBlocks=requestedCommunication=-1; blocksChanged.store(false); }
         vabpnnConfigureBlockMode(vabpnnSpikeBlockModel(spikeModel),enabled,mode,stream);
+    }
+    void serviceMemeMode(cudaStream_t stream) {
+        if(!memesChanged.load()) return;
+        if(!checkpointOpened) {
+            std::lock_guard<std::mutex> lock(checkpointMutex);
+            if(!checkpointPath.empty()) return;
+        }
+        int enabled;
+        { std::lock_guard<std::mutex> lock(controlMutex);
+            enabled=requestedMemes;requestedMemes=-1;memesChanged.store(false); }
+        auto* blocks=vabpnnSpikeBlockModel(spikeModel);
+        vabpnnConfigureMemeEnabled(vabpnnBlockMemeModel(blocks),enabled,stream);
+        // A held five-frame action must not survive a branch change.
+        vabpnnResetBlockHistory(blocks,stream);
     }
     void serviceCheckpoint() {
         // The path is immutable after configuration. Most worker iterations have
@@ -283,21 +314,24 @@ private:
                 // No operator runs here. Initialized model events are drained once on the worker.
                 checkCuda(cudaDeviceSynchronize(),"wait before checkpoint resume");
                 int migrated=0;
-                bool loaded=vabpnn::loadModelCheckpoint(path,checkpointParts(),false,4);
-                if(!loaded) {
-                    const auto previous=(std::filesystem::path(path).parent_path()/L"online-v3.bin").wstring();
-                    loaded=vabpnn::loadModelCheckpoint(previous,checkpointParts(true,true,false),false,3);
-                    if(loaded) migrated=3;
+                auto parts=checkpointParts();
+                bool loaded=vabpnn::loadModelCheckpoint(path,parts,false,8);
+                const auto v7Parts=checkpointParts(true,true,true,true,true,false);
+                const auto v7=(std::filesystem::path(path).parent_path()/L"release-1.3.0.bin").wstring();
+                if(!loaded && v7!=path) loaded=vabpnn::loadModelCheckpoint(v7,v7Parts,false,7);
+                const auto legacyParts=checkpointParts(true,true,true,true,false,false);
+                const wchar_t* formalNames[]={L"release-1.1.0.bin",L"release-1.0.2.bin",L"release-1.0.1.bin",L"release-1.0.0.bin"};
+                for(const auto name:formalNames) {
+                    if(loaded) break;
+                    const auto formal=(std::filesystem::path(path).parent_path()/name).wstring();
+                    if(formal!=path) loaded=vabpnn::loadModelCheckpoint(formal,legacyParts,false,6);
                 }
-                if(!loaded) {
-                    const auto previous=(std::filesystem::path(path).parent_path()/L"online-v2.bin").wstring();
-                    loaded=vabpnn::loadModelCheckpoint(previous,checkpointParts(true,false,false));
-                    if(loaded) migrated=2;
-                }
-                if(!loaded) {
-                    const auto legacy=(std::filesystem::path(path).parent_path()/L"online-v1.bin").wstring();
-                    loaded=vabpnn::loadModelCheckpoint(legacy,checkpointParts(false,false,false),true);
-                    if(loaded) migrated=1;
+                const wchar_t* previousNames[]={L"online-v1.bin",L"online-v2.bin",L"online-v3.bin",
+                    L"preview-1.0.0-pre-v1.bin",L"preview-1.0.0-pre-v2.bin"};
+                for(int version=5;!loaded && version>=1;--version) {
+                    const auto previous=(std::filesystem::path(path).parent_path()/previousNames[version-1]).wstring();
+                    loaded=vabpnn::loadLegacyActionCheckpoint(previous,legacyParts,version);
+                    if(loaded) migrated=version;
                 }
                 if(loaded) {
                     vabpnnResumeJepaOptimizer(jepaModel,nullptr);
@@ -305,23 +339,23 @@ private:
                 }
                 checkpointOpened = true; checkpointStatus.store(loaded ? 2 : 1);
                 std::lock_guard<std::mutex> lock(checkpointMutex);
-                checkpointMessage = migrated==3 ? "V3 restored read-only; neutral preview controllers initialized"
-                    : migrated==2 ? "V2 model, optimizer and connections restored; neutral position adapter and preview controllers initialized"
-                    : migrated==1 ? "V1 model and optimizer restored; new connections and neutral position adapter initialized"
-                    : loaded ? "Model, optimizer, connections and position adapter restored" : "Fresh model; human demonstration mode";
+                checkpointMessage = migrated ? "13-action model and optimizer migrated read-only; Ctrl/Shift initialized neutral"
+                    : loaded ? "15-action model, optimizer and connections restored; seconds/minutes timeline ready" : "Fresh model; human demonstration mode";
                 nextSave = std::chrono::steady_clock::now()+std::chrono::seconds(120);
             }
             const auto now = std::chrono::steady_clock::now();
             bool changed = false;
             { std::lock_guard<std::mutex> lock(controlMutex);
-                changed = latestOnline.examples!=lastSavedExamples || latestJepa.selfSupervisedSteps!=lastSavedSelfSteps; }
+                changed = latestOnline.examples!=lastSavedExamples || latestJepa.selfSupervisedSteps!=lastSavedSelfSteps
+                    || latestSpike.topologyUpdates!=lastSavedTopology; }
             const bool requested = saveRequested.exchange(false);
             if (requested || (now>=nextSave && changed && checkpointStatus.load()>0)) {
                 saveSerial=saveRequestSerial.load();
                 checkCuda(cudaDeviceSynchronize(),"wait before model checkpoint");
-                vabpnn::saveModelCheckpoint(path,checkpointParts(),4);
+                vabpnn::saveModelCheckpoint(path,checkpointParts(),8);
                 { std::lock_guard<std::mutex> lock(controlMutex);
-                    lastSavedExamples=latestOnline.examples; lastSavedSelfSteps=latestJepa.selfSupervisedSteps; }
+                    lastSavedExamples=latestOnline.examples; lastSavedSelfSteps=latestJepa.selfSupervisedSteps;
+                    lastSavedTopology=latestSpike.topologyUpdates; }
                 { std::lock_guard<std::mutex> lock(checkpointMutex);
                     checkpointStatus.store(3); checkpointMessage="Model and optimizer saved";
                     saveFinishedSerial=saveSerial; }
@@ -377,7 +411,7 @@ private:
                         latestControl = *pendingControl; latestDecision = *pendingDecision;
                     }
                     latestOnline = *pendingOnline; latestJepa = *pendingJepa; latestSpike = *pendingSpike;
-                    latestBlocks=*pendingBlocks; latestBlockFrame=f.frameId;
+                    latestBlocks=*pendingBlocks;latestMemes=*pendingMemes; latestBlockFrame=f.frameId;
                 }
                 float milliseconds=0;
                 checkCuda(cudaEventElapsedTime(&milliseconds,f.started,f.processed),"measure GPU operator budget");
@@ -399,6 +433,11 @@ private:
                     std::lock_guard<std::mutex> lock(scopeMutex);
                     scopeLatest=*scopePending; scopeMeta=metadata;
                 }
+                if(f.hasMemeScope && memeScopeEnabled.load() && !resetTemporal.load() && f.frameId>=minimumControlFrame.load()) {
+                    memeScopePending->meta[38]=us;
+                    std::lock_guard<std::mutex> lock(memeScopeMutex);
+                    memeScopeLatest=*memeScopePending;
+                }
                 lastProcessed.store(f.frameId);
                 ++processed;
                 f.state = FRAME_FREE;
@@ -409,11 +448,13 @@ private:
     void consumeLatest(Pool& p) {
         if (p.processing >= 0) return;
         serviceBlockMode(p.operatorStream);
+        serviceMemeMode(p.operatorStream);
         if (resetTemporal.exchange(false)) {
             vabpnnResetDecisionState(decisionModel, p.operatorStream);
             vabpnnResetJepaHistory(jepaModel, p.operatorStream);
             vabpnnResetOnlineHistory(onlineModel, p.operatorStream);
             vabpnnResetSpikeHistory(spikeModel, p.operatorStream);
+            checkCuda(cudaMemsetAsync(memeTraceDevice,0,sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks,p.operatorStream),"clear viewer relay history");
         }
         for (int i = 0; i < capacity; ++i)
             if (p.frames[i].state == FRAME_READY && p.frames[i].frameId < minimumControlFrame.load()) {
@@ -431,7 +472,15 @@ private:
             }
         auto& f = p.frames[latest];
         VabpnnGpuFrame frame{f.rgba, f.pitch, f.rgbNchw, p.width, p.height,
-                            f.frameId, f.captureNanos, p.operatorStream, neuronModel, decisionModel, jepaModel, onlineModel, spikeModel, f.position};
+                            f.frameId, f.captureNanos, p.operatorStream, neuronModel, decisionModel, jepaModel, onlineModel, spikeModel, f.position,
+                            f.demo.modelControl != 0};
+        const bool traceEnabled=memeScopeEnabled.load();
+        if(traceEnabled && !tracing) {
+            checkCuda(cudaMemsetAsync(memeTraceDevice,0,sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks,p.operatorStream),"enable viewer relay history");
+            nextMemeScope={};
+        }
+        tracing=traceEnabled;
+        frame.memeTrace=traceEnabled ? memeTraceDevice:nullptr;
         f.state = FRAME_PROCESSING;
         p.processing = latest;
         checkCuda(cudaEventRecord(f.started,p.operatorStream),"start GPU frame budget");
@@ -451,6 +500,8 @@ private:
                                  cudaMemcpyDeviceToHost,p.operatorStream),"copy connection counters");
         checkCuda(cudaMemcpyAsync(pendingBlocks,vabpnnBlockModelView(vabpnnSpikeBlockModel(spikeModel)).counters,
                                  sizeof(vabpnn::BlockCounters),cudaMemcpyDeviceToHost,p.operatorStream),"copy bounded block counters");
+        checkCuda(cudaMemcpyAsync(pendingMemes,&vabpnnMemeModelView(vabpnnBlockMemeModel(vabpnnSpikeBlockModel(spikeModel))).persistent->counters,
+                                 sizeof(vabpnn::MemeCounters),cudaMemcpyDeviceToHost,p.operatorStream),"copy bounded meme counters");
         f.hasScope=false;
         const auto scopeNow=std::chrono::steady_clock::now();
         if(scopeEnabled.load() && scopeNow>=nextScope) {
@@ -458,6 +509,14 @@ private:
             checkCuda(cudaMemcpyAsync(scopePending,scopeDevice,sizeof(vabpnn::ScopeTelemetry),
                                      cudaMemcpyDeviceToHost,p.operatorStream),"copy sampled network state");
             f.hasScope=true; nextScope=scopeNow+std::chrono::milliseconds(100);
+        }
+        f.hasMemeScope=false;
+        if(traceEnabled && scopeNow>=nextMemeScope) {
+            vabpnnLaunchMemeScope(frame,memeScopeTile.load(),memeScopeDevice);
+            checkCuda(cudaMemcpyAsync(memeScopePending,memeScopeDevice,sizeof(vabpnn::MemeScopeTelemetry),
+                cudaMemcpyDeviceToHost,p.operatorStream),"copy 5 Hz meme snapshot");
+            f.hasMemeScope=true;
+            nextMemeScope=scopeNow+std::chrono::milliseconds(200);
         }
         checkCuda(cudaEventRecord(f.processed, p.operatorStream), "record operator completion");
     }
@@ -575,8 +634,13 @@ private:
             spikeModel = vabpnnCreateSpikeModel(nullptr);
             checkCuda(cudaMalloc(reinterpret_cast<void**>(&scopeDevice),sizeof(vabpnn::ScopeTelemetry)),"allocate network telemetry");
             checkCuda(cudaMallocHost(reinterpret_cast<void**>(&scopePending),sizeof(vabpnn::ScopeTelemetry)),"allocate pinned network telemetry");
+            checkCuda(cudaMalloc(reinterpret_cast<void**>(&memeScopeDevice),sizeof(vabpnn::MemeScopeTelemetry)),"allocate meme viewer telemetry");
+            checkCuda(cudaMallocHost(reinterpret_cast<void**>(&memeScopePending),sizeof(vabpnn::MemeScopeTelemetry)),"allocate pinned meme viewer telemetry");
+            checkCuda(cudaMalloc(reinterpret_cast<void**>(&memeTraceDevice),sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks),"allocate viewer relay history");
+            checkCuda(cudaMemset(memeTraceDevice,0,sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks),"initialize viewer relay history");
             checkCuda(cudaMallocHost(reinterpret_cast<void**>(&pendingSpike),sizeof(vabpnn::SpikeCounters)),"allocate connection counters");
             checkCuda(cudaMallocHost(reinterpret_cast<void**>(&pendingBlocks),sizeof(vabpnn::BlockCounters)),"allocate pinned block counters");
+            checkCuda(cudaMallocHost(reinterpret_cast<void**>(&pendingMemes),sizeof(vabpnn::MemeCounters)),"allocate pinned meme counters");
             checkCuda(cudaMallocHost(reinterpret_cast<void**>(&pendingOnline), sizeof(vabpnn::OnlineOutput)),
                       "allocate pinned training counters");
             checkCuda(cudaMallocHost(reinterpret_cast<void**>(&pendingJepa), sizeof(vabpnn::JepaOutput)),
@@ -588,7 +652,8 @@ private:
             std::memset(pendingDecision, 0, sizeof(vabpnn::DecisionStatus));
             std::memset(pendingControl, 0, sizeof(vabpnn::ControlCommand));
             modelBytes.store(vabpnnNeuronModelBytes(neuronModel) + vabpnnDecisionModelBytes(decisionModel)
-                + vabpnnJepaModelBytes(jepaModel) + vabpnnOnlineModelBytes(onlineModel) + vabpnnSpikeModelBytes(spikeModel) + sizeof(vabpnn::ScopeTelemetry));
+                + vabpnnJepaModelBytes(jepaModel) + vabpnnOnlineModelBytes(onlineModel) + vabpnnSpikeModelBytes(spikeModel) + sizeof(vabpnn::ScopeTelemetry)
+                + sizeof(vabpnn::MemeScopeTelemetry) + sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks);
             while (!stop.load()) {
                 serviceCheckpoint();
                 auto p = std::atomic_load(&pool);
@@ -616,8 +681,12 @@ private:
         }
         if(scopeDevice) { cudaFree(scopeDevice); scopeDevice=nullptr; }
         if(scopePending) { cudaFreeHost(scopePending); scopePending=nullptr; }
+        if(memeScopeDevice) { cudaFree(memeScopeDevice); memeScopeDevice=nullptr; }
+        if(memeScopePending) { cudaFreeHost(memeScopePending); memeScopePending=nullptr; }
+        if(memeTraceDevice) { cudaFree(memeTraceDevice); memeTraceDevice=nullptr; }
         if(pendingSpike) { cudaFreeHost(pendingSpike); pendingSpike=nullptr; }
         if(pendingBlocks) { cudaFreeHost(pendingBlocks); pendingBlocks=nullptr; }
+        if(pendingMemes) { cudaFreeHost(pendingMemes); pendingMemes=nullptr; }
         vabpnnDestroySpikeModel(spikeModel); spikeModel=nullptr;
         if (pendingOnline) { cudaFreeHost(pendingOnline); pendingOnline = nullptr; }
         if (pendingJepa) { cudaFreeHost(pendingJepa); pendingJepa = nullptr; }
@@ -743,8 +812,12 @@ Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nResetDecision(JNIEnv* env, j
         pipeline->resetTemporal.store(true);
         { std::lock_guard<std::mutex> lock(pipeline->controlMutex);
           const auto positionSteps=pipeline->latestDecision.positionSteps;
+          const auto minuteSteps=pipeline->latestDecision.minuteSteps;
+          const auto bayesianMotionSteps=pipeline->latestDecision.bayesianMotionSteps;
           pipeline->latestControl = {}; pipeline->latestDecision = {};
-          pipeline->latestDecision.positionSteps=positionSteps; }
+          pipeline->latestDecision.positionSteps=positionSteps;
+          pipeline->latestDecision.minuteSteps=minuteSteps;
+          pipeline->latestDecision.bayesianMotionSteps=bayesianMotionSteps; }
         pipeline->wake.notify_one();
     } catch (const std::exception& e) { throwJava(env, e); }
 }
@@ -778,18 +851,30 @@ Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nPositionStatus(JNIEnv* env,j
     } catch(const std::exception& e) { throwJava(env,e); }
 }
 extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nTimeStatus(JNIEnv* env,jclass,jlong handle,jlongArray target) {
+    try {
+        if(!target || env->GetArrayLength(target)!=5) throw std::runtime_error("Invalid dual-clock status buffer");
+        auto* pipeline=from(handle);vabpnn::DecisionStatus s;
+        {std::lock_guard<std::mutex> lock(pipeline->controlMutex);s=pipeline->latestDecision;}
+        jlong minutes;std::memcpy(&minutes,&s.elapsedMinutes,sizeof(minutes));
+        const jlong data[5]={minutes,static_cast<jlong>(s.minuteBuckets),
+            static_cast<jlong>(s.minuteSteps),static_cast<jlong>(s.frameId),static_cast<jlong>(s.bayesianMotionSteps)};
+        env->SetLongArrayRegion(target,0,5,data);
+    } catch(const std::exception& e) {throwJava(env,e);}
+}
+extern "C" JNIEXPORT void JNICALL
 Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nDemo(JNIEnv* env,jclass,jlong handle,jlongArray values,jdoubleArray motion) {
     try {
-        if(!values || !motion || env->GetArrayLength(values)!=15 || env->GetArrayLength(motion)!=3)
+        if(!values || !motion || env->GetArrayLength(values)!=17 || env->GetArrayLength(motion)!=3)
             throw std::runtime_error("Invalid real-input metadata");
-        jlong v[15]; jdouble d[3];
-        env->GetLongArrayRegion(values,0,15,v); env->GetDoubleArrayRegion(motion,0,3,d);
+        jlong v[17]; jdouble d[3];
+        env->GetLongArrayRegion(values,0,17,v); env->GetDoubleArrayRegion(motion,0,3,d);
         if(env->ExceptionCheck()) return;
         vabpnn::DemoSample sample;
         sample.epoch=v[0]; sample.heldKeys=static_cast<std::uint32_t>(v[1]);
-        sample.active=v[2]==1; sample.modelControl=v[3]==1; sample.pointerMode=static_cast<std::uint32_t>(v[14]);
+        sample.active=v[2]==1; sample.modelControl=v[3]==1; sample.pointerMode=static_cast<std::uint32_t>(v[16]);
         for(int k=0;k<4;++k) sample.edge[k]=v[4+k];
-        for(int k=0;k<6;++k) sample.keyHeldNanos[k]=v[8+k];
+        for(int k=0;k<8;++k) sample.keyHeldNanos[k]=v[8+k];
         sample.mouseX=d[0]; sample.mouseY=d[1]; sample.wheel=d[2];
         auto* pipeline=from(handle);
         std::lock_guard<std::mutex> lock(pipeline->demoMutex); pipeline->latestDemo=sample;
@@ -910,5 +995,60 @@ Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nBlockStatus(JNIEnv* env,jcla
             static_cast<jlong>(c.broadcasts),c.enabled,c.communication,c.radius,c.eligible,c.candidates,
             c.punished,c.invalidConfig,static_cast<jlong>(frame)};
         env->SetLongArrayRegion(target,0,14,data);
+    } catch(const std::exception& e) { throwJava(env,e); }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nMemes(JNIEnv* env,jclass,jlong handle,jint enabled) {
+    try {
+        if(enabled<0 || enabled>1) throw std::runtime_error("Invalid meme mode");
+        auto* p=from(handle);
+        { std::lock_guard<std::mutex> lock(p->controlMutex);p->requestedMemes=enabled;p->memesChanged.store(true); }
+        p->wake.notify_one();
+    } catch(const std::exception& e) {throwJava(env,e);}
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nMemeStatus(JNIEnv* env,jclass,jlong handle,jlongArray target) {
+    try {
+        if(!target || env->GetArrayLength(target)!=12) throw std::runtime_error("Twelve-long meme status required");
+        auto* p=from(handle);vabpnn::MemeCounters c;std::uint64_t frame;
+        { std::lock_guard<std::mutex> lock(p->controlMutex);c=p->latestMemes;frame=p->latestBlockFrame; }
+        const jlong data[12]={static_cast<jlong>(c.observedFrames),static_cast<jlong>(c.supervisedFrames),
+            static_cast<jlong>(c.projectionUpdates),static_cast<jlong>(c.propagations),
+            static_cast<jlong>(c.receipts),static_cast<jlong>(c.longSelections),static_cast<jlong>(c.dispatches),
+            c.enabled,c.localActive,c.importActive,c.invalidConfig,static_cast<jlong>(frame)};
+        env->SetLongArrayRegion(target,0,12,data);
+    } catch(const std::exception& e) {throwJava(env,e);}
+}
+
+
+
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nMemeScopeEnabled(JNIEnv* env,jclass,jlong handle,jboolean enabled,jint tile) {
+    try {
+        if(tile<0 || tile>=vabpnn::MemeBlocks) throw std::runtime_error("Meme viewer tile out of range");
+        auto* p=from(handle);p->memeScopeTile.store(tile);
+        const bool active=enabled==JNI_TRUE,previous=p->memeScopeEnabled.exchange(active);
+        if(active && !previous) {
+            std::lock_guard<std::mutex> lock(p->memeScopeMutex);
+            p->memeScopeLatest=vabpnn::MemeScopeTelemetry{};
+        }
+        p->wake.notify_one();
+    } catch(const std::exception& e) { throwJava(env,e); }
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nMemeScope(JNIEnv* env,jclass,jlong handle,
+        jlongArray meta,jfloatArray values,jintArray discrete,jlongArray identities) {
+    try {
+        if(!meta || !values || !discrete || !identities
+            || env->GetArrayLength(meta)!=vabpnn::MemeScopeMeta || env->GetArrayLength(values)!=vabpnn::MemeScopeFloats
+            || env->GetArrayLength(discrete)!=vabpnn::MemeScopeInts || env->GetArrayLength(identities)!=vabpnn::MemeScopeLongs)
+            throw std::runtime_error("Meme viewer buffer shape mismatch");
+        auto* p=from(handle);std::lock_guard<std::mutex> lock(p->memeScopeMutex);
+        static_assert(sizeof(jlong)==sizeof(std::uint64_t),"JNI identity width");
+        env->SetLongArrayRegion(meta,0,vabpnn::MemeScopeMeta,reinterpret_cast<const jlong*>(p->memeScopeLatest.meta));
+        env->SetFloatArrayRegion(values,0,vabpnn::MemeScopeFloats,p->memeScopeLatest.values);
+        env->SetIntArrayRegion(discrete,0,vabpnn::MemeScopeInts,p->memeScopeLatest.discrete);
+        env->SetLongArrayRegion(identities,0,vabpnn::MemeScopeLongs,reinterpret_cast<const jlong*>(p->memeScopeLatest.identities));
     } catch(const std::exception& e) { throwJava(env,e); }
 }

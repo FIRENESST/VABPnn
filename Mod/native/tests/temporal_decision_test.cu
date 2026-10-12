@@ -46,10 +46,10 @@ static void upload(DecisionParameters* target, const DecisionParameters& paramet
     check(cudaMemcpyAsync(target, &parameters, sizeof(parameters), cudaMemcpyHostToDevice, stream));
 }
 static DecisionOutput run(VabpnnDecisionModel* model, std::int32_t* deviceVotes,
-                          cudaStream_t stream, const Votes& votes, std::uint64_t nanos, std::uint64_t id) {
+                          cudaStream_t stream, const Votes& votes, std::uint64_t nanos, std::uint64_t id, bool continuous=false) {
     check(cudaMemcpyAsync(deviceVotes, votes.data(), sizeof(votes), cudaMemcpyHostToDevice, stream));
     VabpnnGpuFrame frame{};
-    frame.stream = stream; frame.captureNanos = nanos; frame.frameId = id;
+    frame.stream = stream; frame.captureNanos = nanos; frame.frameId = id; frame.evaluationMode=continuous;
     vabpnnLaunchTemporalDecision(frame, deviceVotes, model);
     DecisionOutput result{};
     check(cudaMemcpyAsync(&result, vabpnnDecisionModelView(model).output, sizeof(result), cudaMemcpyDeviceToHost, stream));
@@ -135,15 +135,15 @@ int main() {
         p = fixture(); p.logLikelihoodBias[0] = std::log(9.0f); p.thresholdBias[0] = logit(.95);
         p.logLikelihoodBias[2] = std::log(4.0f); p.thresholdBias[2] = logit(.7);
         p.logLikelihoodBias[3] = std::log(3.0f); p.thresholdBias[3] = logit(.7);
-        chooseK(p, 13); upload(parameters, p, stream); vabpnnResetDecisionState(model, stream);
+        chooseK(p, VoteCount); upload(parameters, p, stream); vabpnnResetDecisionState(model, stream);
         result = run(model, deviceVotes, stream, votes, 1'000'000'000ull, 4);
-        require(result.requestedK == 13 && result.selectedCount == 2
+        require(result.requestedK == VoteCount && result.selectedCount == 2
                 && result.selectedMask == ((1u << 2) | (1u << 3)), "High posterior can be excluded; k is bounded by eligibility");
         p.thresholdBias[0] = logit(.8); chooseK(p, 1);
         upload(parameters, p, stream); vabpnnResetDecisionState(model, stream);
         result = run(model, deviceVotes, stream, votes, 1'000'000'000ull, 5);
         require(result.selectedMask == 1 && result.requestedK == 1, "Updated threshold and k heads affect next decision");
-        std::puts("PASS: dynamic threshold parameters, learned-k head changes, k=13 capped by candidate count.");
+        std::puts("PASS: dynamic threshold parameters, learned-k head changes, k=15 capped by candidate count.");
 
         const std::array<std::array<int, 2>, 4> pairs{{{{7,8}},{{9,10}},{{7,11}},{{8,11}}}};
         for (const auto& pair : pairs) {
@@ -172,6 +172,19 @@ int main() {
         result = run(model, deviceVotes, stream, votes, 1'010'000'000ull, 9);
         near(result.command.mouseDx, 0, "Missing motion is cleared"); near(result.command.wheelSteps, 0, "Old wheel command cannot repeat");
         std::puts("PASS: all four and only four conflict pairs, legal W+S and press+release, independent external motion gates.");
+
+        p=fixture();p.enabledKChoices=DecisionKChoices;chooseK(p,2);
+        upload(parameters,p,stream);vabpnnResetDecisionState(model,stream);
+        for(int step=0;step<12;++step) {
+            result=run(model,deviceVotes,stream,votes,2'000'000'000ull+step*20'000'000ull,50+step,true);
+            require(result.valid && result.eligibleMask==((1u<<VoteCount)-1) && result.selectedCount==2,
+                "Continuous frozen control emits fresh top-k even with every posterior below threshold");
+            for(int k=0;k<VoteCount;++k) require(result.posterior[k]<result.threshold[k],"Fixture is below every confidence threshold");
+        }
+        chooseK(p,0);upload(parameters,p,stream);
+        result=run(model,deviceVotes,stream,votes,2'260'000'000ull,63,true);
+        require(result.valid && !result.selectedMask && !result.requestedK,"Learned k=0 is a current rest packet, never forced random input");
+        std::puts("PASS: continuous no-threshold frozen selection emits fresh packets; learned rest and conflict rules remain.");
 
         // Controlled attention: Q=K=0, V/output=identity, no FFN. CPU uses explicit weighted
         // history averages and two layer normalizations, rather than the production kernel.
@@ -237,3 +250,4 @@ int main() {
     if (stream) cudaStreamDestroy(stream);
     return exitCode;
 }
+

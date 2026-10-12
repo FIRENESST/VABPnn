@@ -13,7 +13,7 @@ import static cn.vabpnn.mod.client.scope.ScopeSnapshot.*;
 
 /** AtomSpike-inspired dark scope; all drawn activity and connections come from observed GPU state. */
 public final class ScopePanel extends JPanel {
-    public static final int LOGICAL_WIDTH=768,LOGICAL_HEIGHT=1238;
+    public static final int LOGICAL_WIDTH=768,LOGICAL_HEIGHT=1414;
     private static final Color BG=new Color(8,11,16),PANEL=new Color(14,19,27),LINE=new Color(32,44,58);
     private static final Color TEXT=new Color(226,234,244),MUTED=new Color(122,138,158);
     private static final Color CYAN=new Color(90,228,255),AMBER=new Color(255,186,74);
@@ -60,7 +60,7 @@ public final class ScopePanel extends JPanel {
                 if(tileIndex>=0) { inspectedTile.set(tileIndex); selected=-1; }
                 int node=localAt(point); if(node>=0) selected=selected==node ? -1:node;
                 if(point.x>=562 && point.x<=742 && point.y>=104 && point.y<=129) {
-                    mapView=(mapView+1)%3; rebuildMap();
+                    mapView=(mapView+1)%4; rebuildMap();
                 }
                 repaint();
             }
@@ -112,6 +112,7 @@ public final class ScopePanel extends JPanel {
         for(int i=0;i<TILES;++i) {
             pixels[i]=mapView==1 ? pulseColor(shown.value(MAP_POS+i),shown.value(MAP_NEG+i)).getRGB()
                 : mapView==2 ? membraneColor(shown.value(BLOCK_SCORE+i),.2f).getRGB()
+                : mapView==3 ? mix(new Color(21,20,38),GREEN,shown.value(MEME_MAP+i)).getRGB()
                 : membraneColor(shown.value(MAP_MEM+i),shown.value(0)).getRGB();
         }
     }
@@ -145,7 +146,7 @@ public final class ScopePanel extends JPanel {
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,RenderingHints.VALUE_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        header(g); overview(g); local(g); history(g); actions(g); mouseMotion(g); hierarchy(g); learning(g);
+        header(g); overview(g); local(g); history(g); actions(g); mouseMotion(g); hierarchy(g); memes(g); learning(g);
         g.setFont(SMALL);
         text(g,"F7 显示/隐藏  ·  F8 切换控制  ·  F9 暂停  ·  F10 保存",24,LOGICAL_HEIGHT-9,MUTED);
         text(g,"GPU 状态采样 10 Hz  ·  窗口 "+fmt("%.0f",fps)+(fps>0 ? " fps":" 待计时"),460,LOGICAL_HEIGHT-9,MUTED);
@@ -154,7 +155,7 @@ public final class ScopePanel extends JPanel {
     private void header(Graphics2D g) {
         panel(g,12,12,744,76); g.setFont(TITLE); text(g,"VABPnn  ·  脉冲网络",24,42,TEXT);
         var state=status.get();
-        String label=state==null ? "等待数据":!state.capturing() ? "采集暂停":state.modelControl() ? "模型控制":"人工示范";
+        String label=state==null ? "等待数据":!state.capturing() ? "采集暂停":state.predictionOnly() ? "仅预测：权重冻结 · 连接动态":state.modelControl() ? "连续控制：权重冻结 · 连接动态":"人工示范";
         Color color=state!=null && state.capturing() ? GREEN:AMBER;
         if(shown==null) { label="等待 GPU 数据"; color=AMBER; }
         else if(!shown.valid()) { label="数据无效"; color=PINK; }
@@ -169,9 +170,9 @@ public final class ScopePanel extends JPanel {
     }
     private void overview(Graphics2D g) {
         panel(g,12,98,744,248); g.setFont(BODY);
-        text(g,"全网 "+(mapView==1 ? "正负脉冲":mapView==2 ? "高层评分":"膜电位")+"  ·  每格一个 16×16 块",24,122,CYAN);
+        text(g,"全网 "+(mapView==1 ? "正负脉冲":mapView==2 ? "高层评分":mapView==3 ? "模因活跃":"膜电位")+"  ·  每格一个 16×16 块",24,122,CYAN);
         g.setColor(new Color(25,34,47)); g.fillRoundRect(562,104,180,24,6,6);
-        g.setFont(SMALL); text(g,mapView==0 ? "点击切换：正负脉冲":mapView==1 ? "点击切换：高层评分":"点击切换：膜电位",574,121,MUTED);
+        g.setFont(SMALL); text(g,mapView==0 ? "点击切换：正负脉冲":mapView==1 ? "点击切换：高层评分":mapView==2 ? "点击切换：模因活跃":"点击切换：膜电位",574,121,MUTED);
         g.setColor(BG); g.fillRect(24,138,360,192);
         if(shown!=null) {
             g.drawImage(overview,24,138,360,192,null);
@@ -195,7 +196,7 @@ public final class ScopePanel extends JPanel {
             int tile=inspectedTile.get(); g.drawRect(24+tile%120*3,138+tile/120*3,3,3);
         }
         g.setFont(BODY);
-        text(g,"连续显存 → CSR / LIF → 13 路决策",406,153,TEXT);
+        text(g,"连续显存 → CSR / LIF → 15 路决策",406,153,TEXT);
         g.setFont(SMALL);
         text(g,"点击左图检查一个块；绿点为高贡献节点",406,179,MUTED);
         text(g,"彩色细线是实际长程边的抽样",406,200,MUTED);
@@ -255,12 +256,12 @@ public final class ScopePanel extends JPanel {
         text(g,"GPU 耗时 · 橙线 10 ms",526,541,MUTED);
     }
     private void actions(Graphics2D g) {
-        panel(g,12,560,744,276); g.setFont(BODY); text(g,"13 路动作  ·  后验概率 / 学习阈值 / 原始票数",24,586,PINK);
+        panel(g,12,560,744,308); g.setFont(BODY); text(g,"15 路动作  ·  后验概率 / 学习阈值 / 原始票数",24,586,PINK);
         var state=status.get();
         boolean executing=state!=null && state.capturing() && state.modelControl() && state.inputActive()
             && state.appliedFrame()>0;
-        g.setFont(SMALL); text(g,executing ? "执行包 #"+state.appliedFrame():state!=null && state.modelControl() && state.inputActive() ? "等待有效指令":"仅显示模型建议",585,586,executing ? GREEN:MUTED);
-        text(g,"概率       橙线：阈值 · 灰线：先验",126,605,MUTED); text(g,"状态",504,605,MUTED); text(g,"原始票数",632,605,MUTED);
+        g.setFont(SMALL); text(g,state!=null && state.predictionOnly() ? "仅预测 · 无操作":executing ? "执行包 #"+state.appliedFrame():state!=null && state.modelControl() && state.inputActive() ? "等待有效指令":"仅显示模型建议",585,586,executing ? GREEN:MUTED);
+        text(g,state!=null && (state.modelControl() || state.predictionOnly()) ? "概率       阈值仅参考 · 不拦截行动":"概率       橙线：阈值 · 灰线：先验",126,605,MUTED); text(g,"状态",504,605,MUTED); text(g,"原始票数",632,605,MUTED);
         for(int k=0;k<ACTIONS;++k) {
             int y=624+k*16;
             float probability=shown==null ? 0:shown.probability(k),threshold=shown==null ? .5f:shown.threshold(k);
@@ -280,17 +281,17 @@ public final class ScopePanel extends JPanel {
         }
     }
     private void mouseMotion(Graphics2D g) {
-        panel(g,12,848,744,116); g.setFont(BODY);
-        text(g,"鼠标位移 · Δx / Δy",24,871,CYAN);
+        panel(g,12,880,744,116); g.setFont(BODY);
+        text(g,"鼠标位移 · Δx / Δy",24,903,CYAN);
         var sample=motion.get(); var state=status.get();
         boolean fresh=sample!=null && sample.fresh(System.nanoTime()) && state!=null
-                && state.capturing() && state.inputActive();
+                && state.capturing() && (state.inputActive() || state.predictionOnly());
         g.setFont(SMALL);
         text(g,fresh ? fmt("最近 %.1f ms 累计 · 原始输入单位",sample.intervalNanos()/1e6)
-                : "暂停 / 等待输入 · 原始输入单位",406,871,MUTED);
-        motionRow(g,"人工输入",898,fresh ? sample.humanDx():0,fresh ? sample.humanDy():0,CYAN);
-        motionRow(g,"模型指令",921,fresh ? sample.predictedDx():0,fresh ? sample.predictedDy():0,AMBER);
-        motionRow(g,"模型执行",944,fresh ? sample.executedDx():0,fresh ? sample.executedDy():0,GREEN);
+                : "暂停 / 等待输入 · 原始输入单位",406,903,MUTED);
+        motionRow(g,"人工输入",930,fresh ? sample.humanDx():0,fresh ? sample.humanDy():0,CYAN);
+        motionRow(g,"模型指令",953,fresh ? sample.predictedDx():0,fresh ? sample.predictedDy():0,AMBER);
+        motionRow(g,"模型执行",976,fresh && !state.predictionOnly() ? sample.executedDx():0,fresh && !state.predictionOnly() ? sample.executedDy():0,GREEN);
     }
     private static void motionRow(Graphics2D g,String label,int y,double dx,double dy,Color color) {
         g.setFont(BODY); text(g,label,24,y,color);
@@ -299,35 +300,59 @@ public final class ScopePanel extends JPanel {
         text(g,fmt("Δy %+.3f",dy==0 ? 0:dy),548,y,color);
     }
     private void hierarchy(Graphics2D g) {
-        panel(g,12,976,744,128); g.setFont(BODY);
+        panel(g,12,1008,744,128); g.setFont(BODY);
         var h=hierarchy.get();
         String mode=shown==null ? "等待数据":shown.discrete[BLOCK_DATA]==0 ? "关闭":
                 switch(shown.discrete[BLOCK_DATA+1]) { case 0 -> "独立"; case 2 -> "竞争"; default -> "合作"; };
-        text(g,"7,680 高层控制器  ·  "+mode+"  ·  当前块 "+(shown==null ? "—":shown.tile()),24,999,CYAN);
+        text(g,"7,680 高层控制器  ·  "+mode+"  ·  当前块 "+(shown==null ? "—":shown.tile()),24,1031,CYAN);
         g.setFont(SMALL);
         int examples=shown==null ? 0:shown.discrete[BLOCK_DATA+2];
         text(g,fmt("方向一致率 %.1f%%  ·  覆盖 %.1f%%  ·  直接证据贡献 %.4f  ·  示例 %,d",
                 shown==null ? 0:shown.value(BLOCK_SELECTED+1)*100,
                 shown==null ? 0:shown.value(BLOCK_SELECTED+2)*100,
-                shown==null ? 0:shown.value(BLOCK_SELECTED),examples),24,1022,TEXT);
+                shown==null ? 0:shown.value(BLOCK_SELECTED),examples),24,1054,TEXT);
         text(g,fmt("阈值 ×%.3f  ·  极性 %+.4f  ·  膜时间常数 ×%.3f  ·  学习率 ×%.3f",
                 shown==null ? 1:shown.value(BLOCK_SELECTED+3),shown==null ? 0:shown.value(BLOCK_SELECTED+4),
-                shown==null ? 1:shown.value(BLOCK_SELECTED+5),shown==null ? 1:shown.value(BLOCK_SELECTED+6)),24,1044,MUTED);
+                shown==null ? 1:shown.value(BLOCK_SELECTED+5),shown==null ? 1:shown.value(BLOCK_SELECTED+6)),24,1076,MUTED);
         text(g,fmt("策略更新 %,d  ·  评分帧 %,d  ·  排名 %,d  ·  累计变异 %,d  ·  最近处罚 %d",
-                h.updates(),h.samples(),h.rankings(),h.mutations(),h.punished()),24,1066,MUTED);
+                h.updates(),h.samples(),h.rankings(),h.mutations(),h.punished()),24,1098,MUTED);
         text(g,examples<32 ? "预热中：前 32 个真实示范样本保持中性，之后开始小幅探索":
-                "人工示范评分与学习；F8 模型控制时保持推理，暂停监督更新",24,1089,AMBER);
+                "F8 冻结网络权重；高贡献点与连接继续动态更新",24,1121,AMBER);
+    }
+    private void memes(Graphics2D g) {
+        panel(g,12,1148,744,132);g.setFont(BODY);
+        boolean enabled=shown!=null && shown.discrete[MEME_DATA]==1;
+        text(g,"上下文 / 动作证据模因  ·  "+(enabled ? "开启":"关闭 / 等待数据"),24,1171,GREEN);
+        g.setFont(SMALL);
+        int source=shown==null ? -1:shown.discrete[MEME_DATA+1];
+        text(g,fmt("支持 %,d  ·  投影更新 %,d  ·  本地可信 %.2f  ·  进口可信 %.2f  ·  上下文匹配 %.2f",
+            shown==null ? 0:shown.discrete[MEME_DATA+3],shown==null ? 0:shown.discrete[MEME_DATA+4],
+            shown==null ? 0:shown.value(MEME_SELECTED),shown==null ? 0:shown.value(MEME_SELECTED+1),
+            shown==null ? 0:shown.value(MEME_SELECTED+4)),24,1192,TEXT);
+        text(g,fmt("进口来源 %s  ·  跳数 %d  ·  包年龄 %.2f s  ·  全网本地 %d / 进口 %d",
+            source<0 ? "—":Integer.toString(source),shown==null ? 0:shown.discrete[MEME_DATA+2],
+            shown==null ? 0:shown.value(MEME_SELECTED+2),shown==null ? 0:shown.discrete[MEME_DATA+5],
+            shown==null ? 0:shown.discrete[MEME_DATA+6]),24,1212,MUTED);
+        for(int k=0;k<ACTIONS;++k) {
+            int x=24+k*47;float value=shown==null ? 0:shown.value(MEME_EVIDENCE+k);
+            g.setColor(LINE);g.drawLine(x,1238,x+35,1238);
+            g.setColor(value>=0 ? CYAN:PINK);
+            int h=(int)(Math.clamp(Math.abs(value),0,1)*13);
+            g.fillRect(x+15,value>=0 ? 1238-h:1238,14,h);
+            text(g,Integer.toString(k+1),x+15,1270,MUTED);
+        }
+        text(g,"F8：权重冻结，选点与传播继续",546,1171,MUTED);
     }
     private void learning(Graphics2D g) {
-        panel(g,12,1116,744,94); g.setFont(BODY);
-        text(g,"学习与队列",24,1139,CYAN);
+        panel(g,12,1292,744,94); g.setFont(BODY);
+        text(g,"学习与队列",24,1315,CYAN);
         int k=shown==null ? 0:shown.discrete[2],chosen=shown==null ? 0:shown.discrete[3];
-        text(g,"网络 k="+k+"  ·  选中 "+chosen+" 项",548,1139,MUTED);
+        text(g,"网络 k="+k+"  ·  选中 "+chosen+" 项",548,1315,MUTED);
         g.setFont(SMALL);
         long[] m=shown==null ? new long[META]:shown.meta;
-        text(g,fmt("示范 %,d    像素更新 %,d    决策更新 %,d    JEPA %,d    位移训练 %,d",m[15],m[16],m[17],m[18],m[19]),24,1163,TEXT);
+        text(g,fmt("示范 %,d    像素更新 %,d    决策更新 %,d    JEPA %,d    位移训练 %,d",m[15],m[16],m[17],m[18],m[19]),24,1339,TEXT);
         String checkpoint=m[22]==2 ? "已恢复":m[22]==3 ? "已保存":m[22]<0 ? "保存异常":"待保存";
         text(g,fmt("JEPA 损失 %.5f   ·   丢帧 %,d / 跳过 %,d   ·   模型 %.1f MiB   ·   %s",
-            shown==null ? 0:shown.value(2),m[8],m[9],m[20]/1048576.0,checkpoint),24,1189,MUTED);
+            shown==null ? 0:shown.value(2),m[8],m[9],m[20]/1048576.0,checkpoint),24,1365,MUTED);
     }
 }

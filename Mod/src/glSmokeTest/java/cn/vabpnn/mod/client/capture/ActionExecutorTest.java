@@ -81,6 +81,22 @@ final class ActionExecutorTest {
                 "screen changed by E: later cursor/click operations are discarded");
         require(executor.appliedFrame()==0 && executor.heldKeys()==0 && executor.heldButtons()==0,
                 "context loss clears execution and holds");
-        System.out.println("PASS: 13 action mappings, declared conflicts, motion gates, mouse press/release, command deduplication and pause/expiry releases.");
+        sink.events.clear();
+        executor.apply(command(13,now,1|(1<<13)|(1<<14)|(1<<7),0,0,0),now,true,sink);
+        require(sink.events.equals(List.of("key:341:true","key:340:true","key:87:true","button:0:true")),
+                "Ctrl/Shift precede W and mouse click; modifiers may coexist with every old action");
+        require(executor.heldKeys()==(1|(1<<13)|(1<<14)),"15-bit packet exposes modifier holds");
+        executor.apply(command(14,now,0,0,0,0),now,true,sink);
+        require(sink.events.subList(4,7).equals(List.of("key:341:false","key:340:false","key:87:false")),
+                "omitted modifier bits explicitly release the holds");
+        executor.stop(sink);sink.events.clear();
+        executor.apply(command(15,now,(1<<13)|(1<<14),0,0,0),now,true,sink);
+        executor.apply(command(15,now,(1<<13)|(1<<14),0,0,0),now+ActionExecutor.COMMAND_LEASE_NANOS+1,true,sink);
+        require(sink.events.contains("key:341:false") && sink.events.contains("key:340:false") && executor.heldKeys()==0,
+                "lease timeout releases both modifiers");
+        sink.events.clear();executor.apply(command(16,now,1<<15,0,0,0),now,true,sink);
+        require(sink.events.isEmpty(),"out-of-range action 16 is rejected");
+        System.out.println("PASS: 15 action mappings, declared conflicts, motion gates, mouse press/release, command deduplication and pause/expiry releases.");
     }
 }
+

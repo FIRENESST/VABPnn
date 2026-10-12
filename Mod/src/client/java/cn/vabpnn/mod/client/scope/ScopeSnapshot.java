@@ -2,14 +2,15 @@ package cn.vabpnn.mod.client.scope;
 
 /** Immutable, bounded GPU observation. Buffers contain neural state only, never game RGB. */
 public final class ScopeSnapshot {
-    public static final int TILES=120*64, CELLS=256, EDGES=512, ACTIONS=13;
+    public static final int TILES=120*64, CELLS=256, EDGES=512, ACTIONS=15;
     public static final int MAP_MEM=8, MAP_POS=MAP_MEM+TILES, MAP_NEG=MAP_POS+TILES;
     public static final int LOCAL_MEM=MAP_NEG+TILES, POSTERIOR=LOCAL_MEM+CELLS;
     public static final int THRESHOLD=POSTERIOR+ACTIONS, PRIOR=THRESHOLD+ACTIONS;
-    public static final int BLOCK_SCORE=PRIOR+ACTIONS, BLOCK_SELECTED=BLOCK_SCORE+TILES, FLOATS=BLOCK_SELECTED+8;
+    public static final int BLOCK_SCORE=PRIOR+ACTIONS, BLOCK_SELECTED=BLOCK_SCORE+TILES, MEME_MAP=BLOCK_SELECTED+8;
+    public static final int MEME_EVIDENCE=MEME_MAP+TILES, MEME_SELECTED=MEME_EVIDENCE+ACTIONS, FLOATS=MEME_SELECTED+8;
     public static final int LOCAL_SPIKE=8, OUTGOING=LOCAL_SPIKE+CELLS, ANCHORS=OUTGOING+1024;
-    public static final int EDGE_PAIRS=ANCHORS+256, VOTES=EDGE_PAIRS+EDGES*2, BLOCK_DATA=VOTES+ACTIONS, INTS=BLOCK_DATA+8, META=24;
-    public static final String[] ACTION_NAMES={"W","A","S","D","E","鼠标 X","鼠标 Y","左键按下","右键按下","左键松开","右键松开","滚轮","空格"};
+    public static final int EDGE_PAIRS=ANCHORS+256, VOTES=EDGE_PAIRS+EDGES*2, BLOCK_DATA=VOTES+ACTIONS, MEME_DATA=BLOCK_DATA+8, INTS=MEME_DATA+8, META=24;
+    public static final String[] ACTION_NAMES={"W","A","S","D","E","鼠标 X","鼠标 Y","左键按下","右键按下","左键松开","右键松开","滚轮","空格","Ctrl 疾跑","Shift 潜行"};
     final long[] meta;
     final float[] values;
     final int[] discrete;
@@ -32,3 +33,4 @@ public final class ScopeSnapshot {
     public boolean stale(long now) { return now-receivedNanos>750_000_000L; }
     public static float clamp(float x) { return Float.isFinite(x) ? Math.clamp(x,0,1):0; }
 }
+

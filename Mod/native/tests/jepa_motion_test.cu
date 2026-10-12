@@ -153,7 +153,7 @@ static void adamReference(Fixture& f, const JepaConfig& config,
 }
 static void poolingAndTraining() {
     Fixture f;
-    require(JepaTotalParameterCount<50'000'000 && JepaParameterCount==510210,"JEPA below 0.05B parameter limit");
+    require(JepaTotalParameterCount<50'000'000 && JepaParameterCount==510722,"JEPA below 0.05B parameter limit");
     const auto bytes=vabpnnJepaModelBytes(f.model);
     require(bytes>sizeof(JepaParameters)*4 && bytes<32'000'000,"Bounded JEPA/AdamW allocation");
     const auto stable=f.view();
@@ -318,3 +318,4 @@ int main() {
         return 0;
     } catch (const std::exception& error) { std::fprintf(stderr,"%s\n",error.what()); return 1; }
 }
+

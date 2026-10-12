@@ -1,5 +1,6 @@
 #include "NetworkScope.h"
 #include "JepaMotion.h"
+#include "MemeState.h"
 #include <vector>
 #include <memory>
 #include <cmath>
@@ -37,7 +38,7 @@ int main() {
         auto view=vabpnnSpikeModelView(spike);
         neuralFixture<<<(NeuronCount+255)/256,256,0,stream>>>(
             const_cast<float*>(view.membrane),vabpnnMutableSpikeSignals(spike,stream));
-        int totals[13]; for(int k=0;k<13;++k) totals[k]=(k%2 ? -1:1)*(k+1)*70'000;
+        int totals[VoteCount]; for(int k=0;k<VoteCount;++k) totals[k]=(k%2 ? -1:1)*(k+1)*70'000;
         check(cudaMemcpyAsync(const_cast<std::int32_t*>(vabpnnNeuronModelView(neuron).output),totals,sizeof(totals),cudaMemcpyHostToDevice,stream));
         auto parameters=std::make_unique<DecisionParameters>();
         check(cudaStreamSynchronize(stream));
@@ -54,6 +55,14 @@ int main() {
         put(persistent->state+inspected,controller,stream);
         BlockControl control; control.memoryScale=1.1f;
         put(const_cast<BlockControl*>(block.controls)+inspected,control,stream);
+        auto* memes=vabpnnBlockMemeModel(vabpnnSpikeBlockModel(spike));
+        auto mv=vabpnnMemeModelView(memes);
+        auto* mp=vabpnnMutableMemePersistent(memes,stream);
+        MemePacket knowledge;knowledge.support=123;knowledge.revision=18;knowledge.confidence=.7f;knowledge.utility=.13f;
+        put(mp->prototypes+inspected,knowledge,stream);
+        MemeAction action;action.feature[0]=MemeInputScale*.37f;action.feature[1]=-MemeInputScale*.2f;
+        put(mv.actions+inspected,action,stream);
+        MemePolicy policy;policy.optimizerSteps=9;put(mp->policy+inspected,policy,stream);
         vabpnnLaunchNetworkScope(frame,inspected,device); check(cudaStreamSynchronize(stream));
         auto host=std::make_unique<ScopeTelemetry>();
         check(cudaMemcpy(host.get(),device,sizeof(*host),cudaMemcpyDeviceToHost));
@@ -63,6 +72,9 @@ int main() {
             && std::fabs(host->values[ScopeBlockSelected+5]-1.1f)<1e-6
             && host->discrete[ScopeBlockData+2]==100 && host->discrete[ScopeBlockData+3]==9,
             "actual controller score/control/counters share the exact GPU snapshot");
+        require(host->discrete[ScopeMemeData+3]==123 && host->discrete[ScopeMemeData+4]==9
+            && std::fabs(host->values[ScopeMemeEvidence]-.37f)<1e-6
+            && std::fabs(host->values[ScopeMemeEvidence+1]+.2f)<1e-6,"actual cached projection feature/support/own step are exported readonly");
         require(host->discrete[0]==1 && host->discrete[1]==inspected && host->discrete[2]==2
             && host->discrete[3]==1 && host->discrete[5]==1,"probabilities/k/eligibility describe the same decision");
         for(int tile=0;tile<SpikeTiles;++tile) {
@@ -83,7 +95,7 @@ int main() {
         }
         require(std::fabs(host->values[ScopePosterior]-.880797f)<1e-5
             && std::fabs(host->values[ScopeThreshold]-.268941f)<1e-5,"posterior and learned threshold, not a dummy UI probability");
-        for(int k=0;k<13;++k) require(host->discrete[ScopeVotes+k]==totals[k],"raw signed totals preserved");
+        for(int k=0;k<VoteCount;++k) require(host->discrete[ScopeVotes+k]==totals[k],"raw signed totals preserved");
         for(int i=0;i<ScopeEdges;++i) {
             const unsigned source=host->discrete[ScopeEdgePairs+2*i];
             const unsigned encoded=host->discrete[ScopeEdgePairs+2*i+1],target=encoded&SpikeSourceMask,kind=encoded>>21;
@@ -105,3 +117,4 @@ int main() {
     vabpnnDestroySpikeModel(spike); vabpnnDestroyJepaModel(jepa); vabpnnDestroyDecisionModel(decision); vabpnnDestroyNeuronModel(neuron);
     if(device) cudaFree(device); if(image) cudaFree(image); if(stream) cudaStreamDestroy(stream); return result;
 }
+

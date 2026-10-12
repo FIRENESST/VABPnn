@@ -34,25 +34,41 @@ void neuronVotes(VabpnnGpuFrame frame, const vabpnn::TernaryWeight* weights,
     const int warp = tid >> 5;
     const std::size_t pixel = static_cast<std::size_t>(y) * vabpnn::NeuronWidth + x;
 
-    // Center-based nearest sampling; keep neurons in a fixed top-left-origin grid.
-    const int sourceX = static_cast<std::size_t>(2 * x + 1) * frame.width / (2 * vabpnn::NeuronWidth);
-    const int sourceY = static_cast<std::size_t>(2 * y + 1) * frame.height / (2 * vabpnn::NeuronHeight);
-    const unsigned char* rgba = frame.rgba
-        + static_cast<std::size_t>(frame.height - 1 - sourceY) * frame.rgbaPitch
-        + static_cast<std::size_t>(sourceX) * 4;
-    const int r = rgba[0], g = rgba[1], b = rgba[2];
     const int pulse=spikes ? spikes[pixel]:1;
     std::uint32_t encoded=0;
-    // Byte RGB gives the same mathematical sign as RGB/255 and preserves exact ties.
-    #pragma unroll
-    for (int k = 0; k < vabpnn::VoteCount; ++k) {
-        const int score = r * static_cast<int>(weights[vabpnn::weightIndex(pixel, 0, k)])
-                        + g * static_cast<int>(weights[vabpnn::weightIndex(pixel, 1, k)])
-                        + b * static_cast<int>(weights[vabpnn::weightIndex(pixel, 2, k)]);
-        const int vote = ((score > 0) - (score < 0))*pulse;
-        encoded |= static_cast<std::uint32_t>(vote+1)<<(k*2);
-        const int sum = warpSum(vote);
-        if (lane == 0) warpVotes[k][warp] = sum;
+    // Every warp is complete. Silent lanes still participate in reduction;
+    // a wholly silent warp can publish exact zero sums without reading RGB/weights.
+    const bool activeWarp=__any_sync(0xffffffffu,pulse!=0);
+    if(activeWarp) {
+        int r=0,g=0,b=0;
+        if(pulse!=0) {
+            // Center-based nearest sampling; preserve fixed top-left-origin neurons.
+            const int sourceX=static_cast<std::size_t>(2*x+1)*frame.width/(2*vabpnn::NeuronWidth);
+            const int sourceY=static_cast<std::size_t>(2*y+1)*frame.height/(2*vabpnn::NeuronHeight);
+            const unsigned char* rgba=frame.rgba
+                +static_cast<std::size_t>(frame.height-1-sourceY)*frame.rgbaPitch
+                +static_cast<std::size_t>(sourceX)*4;
+            r=rgba[0];g=rgba[1];b=rgba[2];
+        }
+        #pragma unroll
+        for(int k=0;k<vabpnn::VoteCount;++k) {
+            int vote=0;
+            if(pulse!=0) {
+                const int score=r*static_cast<int>(weights[vabpnn::weightIndex(pixel,0,k)])
+                    +g*static_cast<int>(weights[vabpnn::weightIndex(pixel,1,k)])
+                    +b*static_cast<int>(weights[vabpnn::weightIndex(pixel,2,k)]);
+                vote=((score>0)-(score<0))*pulse;
+            }
+            encoded|=static_cast<std::uint32_t>(vote+1)<<(k*2);
+            const int sum=warpSum(vote);
+            if(lane==0) warpVotes[k][warp]=sum;
+        }
+    } else {
+        #pragma unroll
+        for(int k=0;k<vabpnn::VoteCount;++k) {
+            encoded|=1u<<(k*2); // Packed neutral is one, not zero (which means -1).
+            if(lane==0) warpVotes[k][warp]=0;
+        }
     }
     if(packedVotes) packedVotes[pixel]=encoded;
     __syncthreads();
@@ -150,3 +166,4 @@ void vabpnnLaunchTernaryVotes(const VabpnnGpuFrame& frame, VabpnnNeuronModel* mo
                   model->blockVotes, model->voteSums);
     checkCuda(cudaGetLastError(), "reduce 13 raw vote totals");
 }
+

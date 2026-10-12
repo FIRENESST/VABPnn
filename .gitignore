@@ -15,6 +15,9 @@
 
 # Build outputs
 build/
+# These are versioned native build scripts, not generated output.
+!/Mod/native/build/
+!/Mod/native/build/*.ps1
 out/
 obj/
 x64/

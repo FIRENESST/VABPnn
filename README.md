@@ -8,6 +8,7 @@
 - [Mod](Mod/)：Fabric 模组、JNI 桥接、Gradle 构建脚本及验证程序。
 - [模组使用与技术说明](Mod/README.md)：启动命令、热键、模型结构和训练流程。
 - [图像采集管线](Mod/docs/FBO_PIPELINE.md)：OpenGL / CUDA 显存交互说明。
+- [当前工程结构](Mod/docs/1.4.1-project-structure.md)：模块位置、构建入口和模型兼容关系。
 - [历史工程检查记录](ENGINEERING_OPTIMIZATION.md)：0.9.5 的优化与验证记录。
 
 ## 构建

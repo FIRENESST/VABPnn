@@ -1,31 +1,15 @@
 #pragma once
 #include "GpuFrame.h"
+#include "ActionContracts.h"
 #include "NeuronModel.h"
 #include "ModelSnapshot.h"
+#include "MinuteTimeline.h"
 
 struct VabpnnDecisionModel;
 
 namespace vabpnn {
-// One-based user numbering is Action index + 1.
-enum class Action : int {
-    W = 0, A, S, D, E, MouseX, MouseY,
-    LeftPress, RightPress, LeftRelease, RightRelease, Wheel, Space, Count
-};
-static_assert(static_cast<int>(Action::Count) == VoteCount, "Exactly 13 atomic actions.");
-__host__ __device__ constexpr std::uint32_t actionBit(Action action) {
-    return 1u << static_cast<int>(action);
-}
+static_assert(static_cast<int>(Action::Count) == VoteCount, "Exactly 15 atomic actions.");
 
-// Filled by the later GPU motion operator. Relative mouse units and vertical wheel steps.
-struct MotionProposal { float mouseDx, mouseDy, wheelSteps; };
-
-// Final control only. JNI transfers this small command, never frames/votes/probabilities.
-struct ControlCommand {
-    std::uint64_t frameId, captureNanos;
-    std::uint32_t selectedMask, valid;
-    float mouseDx, mouseDy, wheelSteps;
-};
-static_assert(sizeof(ControlCommand) == 40, "One 40-byte final control command.");
 // Small execution diagnostics; sampled as host counters, never image/tensor data.
 struct DecisionStatus {
     std::uint64_t frameId;
@@ -34,8 +18,12 @@ struct DecisionStatus {
     std::uint64_t positionNanos, positionEpoch, positionSteps;
     double positionX, positionY, positionZ;
     std::uint32_t positionValid;
+    double elapsedMinutes;
+    std::uint64_t minuteSteps;
+    std::uint32_t minuteBuckets;
+    std::uint64_t bayesianMotionSteps;
 };
-static_assert(sizeof(DecisionStatus)==80,"Bounded decision and position counters.");
+static_assert(sizeof(DecisionStatus)==112,"Bounded decision, position and dual-clock counters.");
 constexpr int DecisionWidth = 16;
 constexpr int DecisionHeads = 2;
 constexpr int DecisionHeadWidth = DecisionWidth / DecisionHeads;
@@ -51,15 +39,20 @@ static_assert(DecisionWidth % DecisionHeads == 0, "Whole attention heads.");
 // Mutable GPU parameters. All heads are trainable; no optimizer or training labels are implied.
 // The evidence head must be trained/calibrated as a CONDITIONAL log likelihood ratio,
 // not as a posterior that already includes the same prior.
-struct DecisionParameters {
-    float nodeEmbedding[VoteCount][DecisionWidth];
+// Empty base preserves the exact 13-action ABI; extended models persist an active k prefix.
+template<int Actions,bool Extended=(Actions>13)> struct DecisionExpansionState {};
+template<int Actions> struct DecisionExpansionState<Actions,true> {
+    float enabledKChoices=Actions+1; // Metadata, activated by real label counts; not an AdamW weight.
+};
+template<int Actions> struct DecisionParametersT : DecisionExpansionState<Actions> {
+    float nodeEmbedding[Actions][DecisionWidth];
     float voteEmbedding[DecisionWidth];
     float timeEmbedding[DecisionTimeFeatures][DecisionWidth];
     float query[DecisionWidth][DecisionWidth];
     float key[DecisionWidth][DecisionWidth];
     float value[DecisionWidth][DecisionWidth];
     float attentionOutput[DecisionWidth][DecisionWidth];
-    float graphBias[DecisionHeads][VoteCount][VoteCount];
+    float graphBias[DecisionHeads][Actions][Actions];
     float logAttentionDecay[DecisionHeads]; // softplus -> decay per second
     float logClockFrequency;                // softplus -> radians per second
     float attentionGain[DecisionWidth], attentionBias[DecisionWidth];
@@ -68,25 +61,27 @@ struct DecisionParameters {
     float feedForwardDown[DecisionHiddenWidth][DecisionWidth];
     float feedForwardDownBias[DecisionWidth];
     float outputGain[DecisionWidth], outputBias[DecisionWidth];
-    float logLikelihoodWeight[VoteCount][DecisionWidth], logLikelihoodBias[VoteCount];
-    float rawVoteWeight[VoteCount]; // Online visual evidence from this action's raw total.
-    float thresholdWeight[VoteCount][DecisionWidth], thresholdBias[VoteCount];
-    float kWeight[DecisionKChoices][DecisionKFeatures], kBias[DecisionKChoices];
-    float initialPriorLogit[VoteCount];
-    float logOnRate[VoteCount], logOffRate[VoteCount]; // softplus -> transitions/second
+    float logLikelihoodWeight[Actions][DecisionWidth], logLikelihoodBias[Actions];
+    float rawVoteWeight[Actions]; // Online visual evidence from this action's raw total.
+    float thresholdWeight[Actions][DecisionWidth], thresholdBias[Actions];
+    float kWeight[(Actions+1)][(DecisionWidth+Actions*2)], kBias[(Actions+1)];
+    float initialPriorLogit[Actions];
+    float logOnRate[Actions], logOffRate[Actions]; // softplus -> transitions/second
     float logGateTemperature; // Training extension: relaxed gate, inference remains strict.
 };
+using DecisionParameters=DecisionParametersT<VoteCount>;
 
 // Separate checkpoint part: old pixel, graph, JEPA and optimizer layouts stay unchanged.
 // Zero initialization makes fresh position observations neutral until human teaching.
-struct DecisionPositionAdapter {
-    float evidence[VoteCount][PositionFeatures], k[DecisionKChoices][PositionFeatures];
-    float evidenceFirst[VoteCount][PositionFeatures], evidenceSecond[VoteCount][PositionFeatures];
-    float kFirst[DecisionKChoices][PositionFeatures], kSecond[DecisionKChoices][PositionFeatures];
+template<int Actions> struct DecisionPositionAdapterT {
+    float evidence[Actions][PositionFeatures], k[(Actions+1)][PositionFeatures];
+    float evidenceFirst[Actions][PositionFeatures], evidenceSecond[Actions][PositionFeatures];
+    float kFirst[(Actions+1)][PositionFeatures], kSecond[(Actions+1)][PositionFeatures];
     std::uint64_t steps;
 };
-static_assert(sizeof(DecisionParameters)==15544,"Keep the legacy decision checkpoint layout.");
-static_assert(sizeof(DecisionPositionAdapter)==3896,"324 trainable position weights plus AdamW state.");
+using DecisionPositionAdapter=DecisionPositionAdapterT<VoteCount>;
+static_assert(sizeof(DecisionParametersT<13>)==15544 && sizeof(DecisionParameters)==17028,"Explicit legacy and 15-action decision layouts.");
+static_assert(sizeof(DecisionPositionAdapterT<13>)==3896 && sizeof(DecisionPositionAdapter)==4472,"372 trainable position weights plus AdamW state.");
 
 // Fixed action constraints, separate from learned weights. Defaults: (8,9), (10,11), (8,12), (9,12), in one-based action numbering.
 // Either direction of a pair is sufficient to prevent selecting the two together.
@@ -122,6 +117,7 @@ struct DeviceDecisionView {
     const DecisionOutput* output;
     const ControlCommand* command;
     const DecisionPositionAdapter* position;
+    DeviceMinuteView minutes;
 };
 }
 
@@ -135,9 +131,19 @@ vabpnn::DecisionParameters* vabpnnMutableDecisionParameters(VabpnnDecisionModel*
 vabpnn::DecisionConstraints* vabpnnMutableDecisionConstraints(VabpnnDecisionModel* model, cudaStream_t stream);
 vabpnn::DecisionPositionAdapter* vabpnnMutablePositionAdapter(VabpnnDecisionModel* model, cudaStream_t stream);
 std::size_t vabpnnDecisionPositionCheckpointParts(VabpnnDecisionModel* model, vabpnn::ModelPart* parts);
+vabpnn::DecisionMinutePersistent* vabpnnMutableMinuteTimeline(VabpnnDecisionModel* model,cudaStream_t stream);
+vabpnn::ModelPart vabpnnDecisionMinuteCheckpointPart(VabpnnDecisionModel* model);
+// Called only on a valid cached human demonstration, before changing the seconds heads.
+void vabpnnTrainMinuteDecision(VabpnnDecisionModel* model,const int* active,const std::uint32_t* label,cudaStream_t stream);
+// A cached Bayesian/JEPA residual learns only from the previous real mouse target.
+void vabpnnTrainBayesianMotion(VabpnnDecisionModel* model,const int* active,const float* rateX,const float* rateY,cudaStream_t stream);
+void vabpnnTrainMinuteTimeline(VabpnnMinuteModel* model,const vabpnn::DecisionParameters* base,
+    const vabpnn::DecisionOutput* output,const int* active,const std::uint32_t* label,cudaStream_t stream);
 
-// Queue causal graph/time attention -> CTMC prior -> Bayes -> strict threshold -> learned k.
-// votes is 13 raw int32 totals in device memory. No per-frame allocation, wait, or CPU copy.
+// Queue causal graph/time attention -> CTMC prior -> Bayes -> learned k.
+// Demonstrations retain the calibrated threshold gate. Frozen prediction/control use all
+// valid actions as candidates, continuously producing top-k packets (k=0 remains a learned rest).
+// votes is 15 raw int32 totals in device memory. No per-frame allocation, wait, or CPU copy.
 // One active consumer stream per model; join other streams before the next call.
 void vabpnnLaunchTemporalDecision(const VabpnnGpuFrame& frame,
                                   const std::int32_t* votes, VabpnnDecisionModel* model);
@@ -150,4 +156,5 @@ void vabpnnClearMotionProposal(VabpnnDecisionModel* model, cudaStream_t stream);
 // Episode/world reset: clear history and beliefs, retain learned parameters/constraints.
 // Queue on the model's consumer stream after any previous consumers.
 void vabpnnResetDecisionState(VabpnnDecisionModel* model, cudaStream_t stream);
+
 

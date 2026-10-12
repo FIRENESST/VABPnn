@@ -2,10 +2,11 @@ package cn.vabpnn.mod.client.capture;
 
 /** Only cumulative human control metadata; no pixels, labels invented by a model, or per-frame allocation. */
 public final class DemonstrationInput {
-    private static final int[] KEYS = {87, 65, 83, 68, 69, 32};
-    private static final int[] BITS = {0, 1, 2, 3, 4, 12};
-    private final long[] heldTime = new long[6], edges = new long[4];
-    private final boolean[] held = new boolean[6], buttons = new boolean[2];
+    private static final int[] KEYS = ActionLayout.PHYSICAL_KEYS;
+    private final boolean[] physical = new boolean[KEYS.length];
+    private static final int[] BITS = ActionLayout.KEY_ACTIONS;
+    private final long[] heldTime = new long[8], edges = new long[4];
+    private final boolean[] held = new boolean[8], buttons = new boolean[2];
     private long lastNanos, epoch = 1;
     private double x, y, wheel;
 
@@ -18,11 +19,20 @@ public final class DemonstrationInput {
     }
     public void key(int key, int action, long now) {
         advance(now);
-        for (int k = 0; k < KEYS.length; k++) if (key == KEYS[k]) held[k] = action != 0;
+        for (int k = 0; k < KEYS.length; k++) if (key == KEYS[k]) physical[k] = action != 0;
+        updateHolds();
     }
     public void physicalKeys(boolean[] down, long now) {
         advance(now);
-        System.arraycopy(down, 0, held, 0, held.length);
+        if (down.length != physical.length) throw new IllegalArgumentException("Ten physical key states required");
+        System.arraycopy(down, 0, physical, 0, physical.length);
+        updateHolds();
+    }
+    private void updateHolds() {
+        System.arraycopy(physical,0,held,0,held.length);
+        // Both sides share one logical action and one duration; releasing one side keeps the other held.
+        held[6] |= physical[8];
+        held[7] |= physical[9];
     }
     public boolean button(int button, int action) { return button(button,action,true); }
     /** Track real state in every mode; only human, interactive edges are teaching targets. */
@@ -47,12 +57,13 @@ public final class DemonstrationInput {
     public void wheel(double steps) { if (Double.isFinite(steps)) wheel += steps; }
     public void newScope(long now) { advance(now); epoch++; }
     public void snapshot(long now, boolean active, boolean model, long[] data, double[] motion) {
-        if (data.length != 15 || motion.length != 3) throw new IllegalArgumentException("Invalid demonstration buffers");
+        if (data.length != ActionLayout.DEMO_LONGS || motion.length != 3) throw new IllegalArgumentException("Invalid demonstration buffers");
         advance(now);
         // A held mouse button is a continuing press target, including inside containers.
         int mask = heldKeys() | (buttons[0] ? 1<<7:0) | (buttons[1] ? 1<<8:0);
         data[0] = epoch; data[1] = mask; data[2] = active ? 1 : 0; data[3] = model ? 1 : 0;
-        System.arraycopy(edges, 0, data, 4, 4); System.arraycopy(heldTime, 0, data, 8, 6);
+        System.arraycopy(edges, 0, data, 4, 4); System.arraycopy(heldTime, 0, data, 8, heldTime.length);
         motion[0] = x; motion[1] = y; motion[2] = wheel;
     }
 }
+

@@ -108,6 +108,7 @@ int main() {
         vabpnn::DemoSample demo; demo.active=1; demo.epoch=1; demo.heldKeys=1; demo.pointerMode=1;
         VabpnnGpuFrame frame{rgba,8,rgb,2,2,1,1'000'000'000,stream,neuron,decision,jepa,online};
         auto run=[&]() {
+            frame.evaluationMode=demo.modelControl!=0;
             vabpnnSetDemoSample(online,&demo,stream); vabpnnLaunchOperator(frame);
             cudaCheck(cudaStreamSynchronize(stream));
         };
@@ -127,7 +128,7 @@ int main() {
         verifyFirstPolicyStep(referenceParameters,referenceObservation,*weights,status.lastLabel);
         verifyFirstPositionStep(referenceObservation,read(vabpnnDecisionModelView(decision).position),status.lastLabel);
         std::puts("PASS: coordinate evidence/k weights and all AdamW moments agree with independent CPU reference; previous-frame XYZ only.");
-        require(fabs(status.decisionLoss-(logf(2.0f)+logf(14.0f)))<1e-4,"BCE and k cross entropy");
+        require(fabs(status.decisionLoss-(logf(2.0f)+logf(static_cast<float>(vabpnn::DecisionKChoices))))<1e-4,"BCE and k cross entropy");
         for(int i=0;i<46;++i) {
             frame.frameId++; frame.captureNanos+=20'000'000;
             demo.keyHeldNanos[0]+=20'000'000; demo.mouseX+=0.4;

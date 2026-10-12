@@ -4,6 +4,7 @@
 #include "FrameOperator.h"
 #include "SpikeConnections.h"
 #include "OnlineLearning.h"
+#include "MemeState.h"
 #include "model_checkpoint.h"
 #include <memory>
 #include <vector>
@@ -52,7 +53,9 @@ int main(int argc,char** argv) {
         check(cudaMalloc(reinterpret_cast<void**>(&valid),sizeof(int)));
         check(cudaMalloc(reinterpret_cast<void**>(&label),sizeof(unsigned))); put(valid,1,stream); put(label,1u,stream);
         VabpnnGpuFrame f{image,8,rgb,2,2,123,1'000'000'000ULL,stream,neuron,decision,jepa,online,spike};
-        auto* model=vabpnnSpikeBlockModel(spike); auto b=vabpnnBlockModelView(model);
+        auto* model=vabpnnSpikeBlockModel(spike);
+        vabpnnConfigureMemeEnabled(vabpnnBlockMemeModel(model),0,stream); // Isolate original policy CPU reference; new branch has its own numerical suite.
+        auto b=vabpnnBlockModelView(model);
         auto* persistent=vabpnnMutableBlockPersistent(model,stream);
         auto nv=vabpnnNeuronModelView(neuron); auto dv=vabpnnDecisionModelView(decision); auto sv=vabpnnSpikeModelView(spike);
         check(cudaStreamSynchronize(stream));
@@ -233,6 +236,39 @@ int main(int argc,char** argv) {
                     && disabled.threshold[k]==neutralEnabled.threshold[k],
                     "real legacy model votes/posteriors/thresholds match disabled baseline");
             std::puts("PASS: actual v3 read-only restore, fifteen-part layout, neutral controllers preserve legacy inference.");
+            if(argc>2) {
+                oldParts.push_back(vabpnnBlockCheckpointPart(model));
+                require(oldParts.size()==16,"preview v4 contains exactly sixteen persistent parts");
+                require(loadModelCheckpoint(std::filesystem::u8path(argv[2]).wstring(),oldParts,false,4),
+                        "actual full sixteen-part Minecraft v4 model loads");
+                const auto savedController=read(b.state);
+                const auto savedCounts=read(b.counters);
+                const auto savedConfig=read(b.config);
+                require(savedCounts.scoredFrames>0 && savedCounts.actorUpdates>0 && savedController.examples>0,
+                        "full Minecraft checkpoint contains learned high-level state");
+                vabpnnResumeSpikeModel(spike,stream); vabpnnResumeJepaOptimizer(jepa,stream);
+                vabpnnResetDecisionState(decision,stream); vabpnnResetOnlineHistory(online,stream);
+                check(cudaStreamSynchronize(stream));
+                const auto resumed=read(b.state); const auto resumedConfig=read(b.config);
+                require(std::memcmp(resumed.weights,savedController.weights,sizeof(resumed.weights))==0
+                        && std::memcmp(resumed.first,savedController.first,sizeof(resumed.first))==0
+                        && std::memcmp(resumed.second,savedController.second,sizeof(resumed.second))==0
+                        && resumed.optimizerSteps==savedController.optimizerSteps
+                        && resumed.examples==savedController.examples
+                        && resumed.windowExamples==0 && resumed.poorStreak==0
+                        && resumedConfig.enabled==savedConfig.enabled && resumedConfig.communication==savedConfig.communication,
+                        "full v4 resume retains policy, AdamW and configuration while clearing transient windows");
+                vabpnnLearnBlockControllers(f,valid,label); check(cudaStreamSynchronize(stream));
+                require(read(b.counters).scoredFrames==savedCounts.scoredFrames,
+                        "full v4 resume cannot replay a stale action-label pair");
+                demo.modelControl=1; run(); run();
+                const auto after=read(b.counters);
+                require(after.scoredFrames==savedCounts.scoredFrames && after.actorUpdates==savedCounts.actorUpdates,
+                        "cold-restored high-level model retains supervised counters in model-control mode");
+                controlsBounded(b);
+                std::printf("PASS: actual full v4 cold restore; samples=%llu actorUpdates=%llu rankings=%llu; learned policy/AdamW/config preserved, stale credit cleared.\n",
+                        (unsigned long long)after.scoredFrames,(unsigned long long)after.actorUpdates,(unsigned long long)after.rankings);
+            }
         }
         std::puts("PASS: neutral/bounded controls, cached action CPU AdamW, duplicate/invalid feedback, true-label rank schedule, ties/bottom-fifth/champion/cooldown, sparse windows, bounded double-buffer communication, actual pixel LR and F8 gating, isolated v4 persistence.");
     } catch(const std::exception& e) { std::fprintf(stderr,"FAIL: %s\n",e.what()); result=1; }

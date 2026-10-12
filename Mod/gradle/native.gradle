@@ -1,0 +1,54 @@
+// CUDA operators stay in the original Visual Studio project; Java loads one JNI DLL.
+def cudaOperatorDir = file(providers.gradleProperty("cuda_operator_dir")
+        .getOrElse("../CUDAkernel/SelfCudaKernel/SelfCudaKernel"))
+tasks.register("buildNative", Exec) {
+    group = "build"
+    description = "Build the CUDA/OpenGL JNI DLL."
+    inputs.files(fileTree("native") {
+        include "capture_bridge.cu", "*.h", "build-native.ps1", "build/*.ps1"
+    })
+    inputs.files(fileTree(cudaOperatorDir) {
+        include "**/*.cu", "**/*.cpp", "**/*.cuh", "**/*.h", "**/*.hpp"
+        exclude "**/x64/**", "**/Win32/**", "**/Debug/**", "**/Release/**", "**/.vs/**", "**/build/**", "**/obj/**"
+    })
+    inputs.property("cudaOperatorDirectory", cudaOperatorDir.absolutePath)
+    def nativeOutput = layout.buildDirectory.dir("generated/nativeResources/native/windows-x86_64")
+    outputs.file(nativeOutput.map { it.file("vabpnn_capture.dll") })
+    commandLine("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", file("native/build-native.ps1").absolutePath,
+        "-OutputDirectory", nativeOutput.get().asFile.absolutePath,
+        "-OperatorRoot", cudaOperatorDir.absolutePath)
+}
+sourceSets.client.resources.srcDir(layout.buildDirectory.dir("generated/nativeResources"))
+tasks.named("processClientResources") {
+    dependsOn(tasks.named("buildNative"))
+    exclude("**/*.lib", "**/*.exp")
+}
+tasks.named("sourcesJar", Jar) {
+    dependsOn(tasks.named("buildNative"))
+    exclude("**/*.dll", "**/*.lib", "**/*.exp")
+    from("native") {
+        include("**/*.cu", "**/*.h", "**/*.ps1")
+        into("native-src")
+    }
+    from(cudaOperatorDir) {
+        include("**/*.cu", "**/*.cpp", "**/*.cuh", "**/*.h", "**/*.hpp")
+        exclude("**/x64/**", "**/Win32/**", "**/Debug/**", "**/Release/**", "**/.vs/**", "**/build/**", "**/obj/**")
+        into("operators-src")
+    }
+}
+// Default native verification stays opt-in; the production jar never includes test classes.
+tasks.register("nativeTest", Exec) {
+    group = "verification"
+    description = "Run the existing CUDA operator/model/checkpoint verification programs."
+    commandLine("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", file("native/build-native.ps1").absolutePath, "-TestOperator",
+        "-OperatorRoot", cudaOperatorDir.absolutePath)
+}
+tasks.register("nativeBenchmark", Exec) {
+    group = "verification"
+    description = "Build and run the existing GPU frame budget benchmark."
+    commandLine("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", file("native/build-native.ps1").absolutePath, "-Benchmark",
+        "-OperatorRoot", cudaOperatorDir.absolutePath)
+}

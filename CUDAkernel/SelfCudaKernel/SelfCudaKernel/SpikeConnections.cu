@@ -10,7 +10,10 @@
 namespace {
 using namespace vabpnn;
 constexpr int NearStride=SpikeAnchorLimit-1+SpikeNearCount;
+static_assert(SpikeTiles%4==0,"Four complete scout tiles per block.");
 struct Clock { std::uint64_t lastNanos; float dt,decay; int width,height,valid; };
+// Transient probe details never enter a checkpoint; even sampled RGB stays GPU-only.
+struct PlacementProbe { unsigned pixel,packed,rgb; float contrast,novelty,proxy,alpha; };
 __constant__ int2 nearby[SpikeNearCount];
 void check(cudaError_t code,const char* name) {
     if(code!=cudaSuccess) throw std::runtime_error(std::string(name)+": "+cudaGetErrorString(code));
@@ -33,9 +36,15 @@ __device__ float importance(const SpikePixelStatistics& s) {
 __device__ unsigned tileOf(unsigned pixel) { return pixel/NeuronWidth/16*120+pixel%NeuronWidth/16; }
 __device__ unsigned localOf(unsigned pixel) { return pixel/NeuronWidth%16*16+pixel%NeuronWidth%16; }
 __global__ void initializeConfig(SpikeConfig* config) { *config=SpikeConfig{}; }
-__global__ void localOutgoing(std::uint16_t* out,const float* scores,
+__global__ void localOutgoing(std::uint16_t* out,float* scores,const SpikePixelStatistics* statistics,
                               const SpikeConfig* config,unsigned epoch,bool initial) {
     const int tile=blockIdx.x,local=threadIdx.x;
+    __shared__ float localScore[256];
+    if(!initial) {
+        localScore[local]=importance(statistics[spikePixel(tile,local)]);
+        scores[spikePixel(tile,local)]=localScore[local];
+    }
+    __syncthreads(); // Fused refresh preserves external statistics edits and exact target scores.
     unsigned seed=hash(config->seed ^ spikePixel(tile,local) ^ hash(epoch+1));
     const int degree=initial ? 4:static_cast<int>(seed%5);
     int targets[4]={-1,-1,-1,-1};
@@ -45,7 +54,7 @@ __global__ void localOutgoing(std::uint16_t* out,const float* scores,
             seed=hash(seed+slot+37);
             int target=static_cast<int>(seed&255);
             const int alternate=static_cast<int>((seed>>8)&255);
-            if(!initial && scores[spikePixel(tile,alternate)]>scores[spikePixel(tile,target)]) target=alternate;
+            if(!initial && localScore[alternate]>localScore[target]) target=alternate;
             // Bounded deterministic rejection: at most four exclusions in a 256-node tile.
             for(int attempt=0;attempt<6;++attempt) {
                 bool duplicate=target==local;
@@ -93,7 +102,11 @@ __global__ void refreshScores(const SpikePixelStatistics* stats,float* scores) {
     const unsigned pixel=blockIdx.x*blockDim.x+threadIdx.x;
     if(pixel<NeuronCount) scores[pixel]=importance(stats[pixel]);
 }
-__global__ void candidates(const float* scores,float* keys,unsigned* ids) {
+__device__ float placementIndex(const SpikePlacementArm& arm) {
+    const float variance=fmaxf(0,arm.secondMoment-arm.utility*arm.utility);
+    return arm.utility+0.12f*sqrtf((variance+0.0025f)/(1+arm.visits));
+}
+__global__ void candidates(const float* scores,const SpikePlacementTile* placement,float* keys,unsigned* ids) {
     __shared__ float values[256];
     __shared__ unsigned index[256];
     const int tile=blockIdx.x,tid=threadIdx.x; const auto pixel=spikePixel(tile,tid);
@@ -105,7 +118,15 @@ __global__ void candidates(const float* scores,float* keys,unsigned* ids) {
         }
         __syncthreads();
     }
-    if(tid==0) { keys[tile]=values[0]; ids[tile]=index[0]; }
+    if(tid==0) {
+        float best=values[0]; unsigned id=index[0];
+        for(const auto& arm:placement[tile].arms) {
+            if(arm.pixel>=NeuronCount || !(arm.visits>0)) continue;
+            const float value=placementIndex(arm);
+            if(isfinite(value) && value>best) { best=value;id=arm.pixel; }
+        }
+        keys[tile]=best;ids[tile]=id;
+    }
 }
 __global__ void reduceChampions(const unsigned long long* blockChampions,unsigned* champions) {
     const int action=blockIdx.x,tid=threadIdx.x;
@@ -118,25 +139,47 @@ __global__ void reduceChampions(const unsigned long long* blockChampions,unsigne
     }
     if(tid==0) champions[action]=values[0] ? NoNeuron-static_cast<unsigned>(values[0]):NoNeuron;
 }
+__device__ bool insertAnchor(unsigned id,bool balanced,unsigned* seen,unsigned short* regions,
+                               unsigned* anchors,int& count) {
+    if(id>=NeuronCount) return false;
+    unsigned slot=hash(id)&511u;
+    while(seen[slot]!=NoNeuron && seen[slot]!=id) slot=(slot+1)&511u;
+    if(seen[slot]==id) return false;
+    const unsigned region=id/NeuronWidth/64*30+id%NeuronWidth/64;
+    if(balanced && regions[region]>=4) return false;
+    seen[slot]=id;++regions[region];anchors[count++]=id;return true;
+}
 __global__ void selectAnchors(const float* keys,const unsigned* ids,const unsigned* champions,
                               const SpikeConfig* config,const float* scores,
                               unsigned* anchors,SpikeCounters* counters) {
+    // The chosen sequence is identical to the quadratic reference. A bounded
+    // half-full hash set and 480 region counters avoid repeated ID/division scans.
+    __shared__ unsigned seen[512];
+    __shared__ unsigned short regions[30*16];
+    for(int j=threadIdx.x;j<512;j+=blockDim.x) seen[j]=NoNeuron;
+    for(int j=threadIdx.x;j<30*16;j+=blockDim.x) regions[j]=0;
+    __syncthreads();
+    if(threadIdx.x) return;
     int count=0;
     const int limit=max(0,min(SpikeAnchorLimit,config->maxAnchors));
     for(int k=0;k<VoteCount && count<limit;++k) {
         const unsigned id=champions[k];
         if(id>=NeuronCount || scores[id]<=config->minimumScore) continue;
-        bool duplicate=false; for(int j=0;j<count;++j) duplicate|=anchors[j]==id;
-        if(!duplicate) anchors[count++]=id;
+        insertAnchor(id,false,seen,regions,anchors,count);
+    }
+    const int exploration=limit/8;
+    for(int k=0;k<exploration && count<limit;++k) {
+        const int at=hash(config->seed ^ hash(static_cast<unsigned>(counters->topologyUpdates)+1) ^ hash(k+1))%SpikeTiles;
+        const unsigned id=ids[at];
+        if(id>=NeuronCount || !(keys[at]>config->minimumScore)) continue;
+        insertAnchor(id,false,seen,regions,anchors,count);
     }
     for(int k=0;k<SpikeTiles && count<limit;++k) {
         if(!(keys[k]>config->minimumScore)) break;
-        const unsigned id=ids[k];
-        bool duplicate=false; for(int j=0;j<count;++j) duplicate|=anchors[j]==id;
-        if(!duplicate) anchors[count++]=id;
+        insertAnchor(ids[k],limit>=8,seen,regions,anchors,count);
     }
     for(int j=count;j<SpikeAnchorLimit;++j) anchors[j]=NoNeuron;
-    counters->anchors=count; ++counters->topologyUpdates;
+    counters->anchors=count;++counters->topologyUpdates;
 }
 __global__ void indexAnchors(const unsigned* anchors,unsigned short* index,const SpikeCounters* counters) {
     const unsigned k=threadIdx.x;
@@ -265,26 +308,34 @@ __device__ float crossEntropyGain(float probability,float y,float delta) {
 __global__ void contributions(const unsigned* packed,SpikePixelStatistics* statistics,const SpikeConfig* config,
                               const DecisionOutput* decision,const DecisionParameters* parameters,
                               const int* valid,const unsigned* labels,unsigned long long* blockChampions,
-                              SpikeCounters* counters,float* scores) {
+                              SpikeCounters* counters,float* scores,bool inferred) {
     if(!isfinite(config->statisticsDecay) || config->statisticsDecay<0 || config->statisticsDecay>=1) return;
-    if(!*valid || !decision->valid) return; // Uniform block condition; no barrier divergence.
+    if((!inferred && (!valid || !*valid)) || !decision->valid) return; // Uniform condition.
     const int tile=blockIdx.x,tid=threadIdx.x; const unsigned pixel=spikePixel(tile,tid);
-    const unsigned encoded=packed[pixel],label=*labels;
+    const unsigned encoded=packed[pixel],label=inferred ? 0:*labels;
     const float inverse=1.0f/static_cast<float>(NeuronCount);
     float ce=0,hit=0;
-    __shared__ unsigned long long warpBest[13][8];
+    const unsigned hitMask=inferred ? decision->selectedMask:decision->selectedMask & label;
+    __shared__ unsigned long long warpBest[VoteCount][8];
     for(int k=0;k<VoteCount;++k) {
         const int vote=static_cast<int>((encoded>>(2*k))&3)-1;
         const float y=(label>>k)&1u;
         const float delta=parameters->rawVoteWeight[k]*vote*inverse;
-        const float gain=crossEntropyGain(decision->posterior[k],y,delta)*NeuronCount;
+        const float gain=inferred ? fabsf(parameters->rawVoteWeight[k]*vote)*decision->posterior[k]*(1-decision->posterior[k])
+            :crossEntropyGain(decision->posterior[k],y,delta)*NeuronCount;
         ce+=gain;
-        const bool correctHit=(decision->selectedMask & label & (1u<<k)) && vote>0 && gain>0;
+        const bool correctHit=inferred ? (hitMask & (1u<<k)) && delta>0 && gain>0
+            :(decision->selectedMask & label & (1u<<k)) && vote>0 && gain>0;
         const float value=correctHit ? gain:0;
         if(correctHit) hit=fmaxf(hit,value);
-        unsigned long long best=value>0 ? (static_cast<unsigned long long>(__float_as_uint(value))<<32)
-            |(NoNeuron-pixel):0;
-        for(int offset=16;offset;offset/=2) best=max(best,__shfl_down_sync(0xffffffffu,best,offset));
+        // Eligibility is uniform across the block; non-hit actions have exactly
+        // zero champions. Keep gain/EMA arithmetic and hit tie-breaking unchanged.
+        unsigned long long best=0;
+        if(hitMask & (1u<<k)) {
+            best=value>0 ? (static_cast<unsigned long long>(__float_as_uint(value))<<32)
+                |(NoNeuron-pixel):0;
+            for(int offset=16;offset;offset/=2) best=max(best,__shfl_down_sync(0xffffffffu,best,offset));
+        }
         if((tid&31)==0) warpBest[k][tid/32]=best;
     }
     auto& s=statistics[pixel]; const float a=1-config->statisticsDecay;
@@ -299,6 +350,136 @@ __global__ void contributions(const unsigned* packed,SpikePixelStatistics* stati
     }
     if(tile==0 && tid==0) ++counters->contributionUpdates;
 }
+__global__ void initializePlacement(SpikePlacementTile* placement) {
+    const int tile=blockIdx.x*blockDim.x+threadIdx.x;
+    if(tile>=SpikeTiles) return;
+    auto& state=placement[tile];state=SpikePlacementTile{};
+    unsigned used[SpikePlacementScouts];
+    for(int a=0;a<SpikePlacementScouts;++a) {
+        unsigned local=hash(0x7a6b9d31u ^ hash(tile+1) ^ hash(a+1))&255u;
+        for(int attempt=0;attempt<SpikePlacementScouts;++attempt) {
+            bool duplicate=false;for(int j=0;j<a;++j) duplicate|=used[j]==local;
+            if(!duplicate) break;local=(local+1)&255u;
+        }
+        used[a]=local;state.arms[a].pixel=spikePixel(tile,local);
+    }
+}
+__device__ unsigned placementRgb(const VabpnnGpuFrame& frame,int x,int y) {
+    x=max(0,min(NeuronWidth-1,x));y=max(0,min(NeuronHeight-1,y));
+    const int sx=static_cast<std::size_t>(2*x+1)*frame.width/(2*NeuronWidth);
+    const int sy=static_cast<std::size_t>(2*y+1)*frame.height/(2*NeuronHeight);
+    const auto* c=frame.rgba+static_cast<std::size_t>(frame.height-1-sy)*frame.rgbaPitch+sx*4;
+    return c[0]|(static_cast<unsigned>(c[1])<<8)|(static_cast<unsigned>(c[2])<<16);
+}
+__device__ float relativeRgbDifference(unsigned a,unsigned b) {
+    int difference=0,total=1;
+    for(int c=0;c<3;++c) {
+        const int x=(a>>(8*c))&255,y=(b>>(8*c))&255;
+        difference+=abs(x-y);total+=x+y;
+    }
+    return static_cast<float>(difference)/total; // Contrast, never raw luminance.
+}
+__device__ float placementDiversity(unsigned packed) {
+    int count[3]={};
+    for(int k=0;k<VoteCount;++k) {
+        const unsigned v=(packed>>(2*k))&3;
+        if(v<3) ++count[v];
+    }
+    float entropy=0,squares=0;
+    for(int c=0;c<3;++c) {
+        const float p=static_cast<float>(count[c])/VoteCount;
+        if(p>0) entropy-=p*logf(p);
+        squares+=p*p;
+    }
+    return 0.5f+0.25f*entropy*0.9102392266f+0.375f*(1-squares);
+}
+__global__ void probePlacement(VabpnnGpuFrame frame,SpikePlacementTile* placement,PlacementProbe* probes,
+    const SpikeConfig* config,const TernaryWeight* weights,const DecisionOutput* decision,
+    const DecisionParameters* parameters) {
+    if(!decision->valid) return; // Uniform whole-warp condition.
+    const int tile=blockIdx.x*4+(threadIdx.x>>5),a=threadIdx.x&31;
+    auto& state=placement[tile];
+    if(a==0 && state.rounds>0) {
+        int best=0,worst=1;
+        for(int j=1;j<SpikePlacementScouts;++j)
+            if(placementIndex(state.arms[j])>placementIndex(state.arms[best])) best=j;
+        worst=best==0 ? 1:0;
+        for(int j=0;j<SpikePlacementScouts;++j)
+            if(j!=best && state.arms[j].utility<state.arms[worst].utility) worst=j;
+        unsigned seed=hash(config->seed ^ hash(tile+1) ^ hash(static_cast<unsigned>(state.rounds)+1));
+        unsigned pixel;
+        if(state.rounds&1) {
+            const auto origin=state.arms[best].pixel<NeuronCount ? state.arms[best].pixel:spikePixel(tile,0);
+            const auto offset=nearby[seed%SpikeNearCount];
+            const int x=max(0,min(NeuronWidth-1,static_cast<int>(origin%NeuronWidth)+offset.x));
+            const int y=max(0,min(NeuronHeight-1,static_cast<int>(origin/NeuronWidth)+offset.y));
+            pixel=y*NeuronWidth+x;
+        } else pixel=spikePixel(tile,seed&255u);
+        for(int attempt=0;attempt<SpikePlacementScouts;++attempt) {
+            bool duplicate=false;
+            for(int j=0;j<SpikePlacementScouts;++j) duplicate|=j!=worst && state.arms[j].pixel==pixel;
+            if(!duplicate) break;
+            pixel=spikePixel(tile,(seed+attempt+1)&255u);
+        }
+        state.arms[worst]=SpikePlacementArm{pixel,0,0,0};
+    }
+    __syncthreads();
+    if(a>=SpikePlacementScouts) return;
+    auto& arm=state.arms[a];auto& probe=probes[tile*SpikePlacementScouts+a];
+    if(arm.pixel>=NeuronCount) arm=SpikePlacementArm{spikePixel(tile,hash(tile+a)&255u),0,0,0};
+    const int x=arm.pixel%NeuronWidth,y=arm.pixel/NeuronWidth;
+    const unsigned rgb=placementRgb(frame,x,y);
+    float contrast=0;
+    for(int side=0;side<4;++side)
+        contrast+=relativeRgbDifference(rgb,placementRgb(frame,x+(side==0)-(side==1),y+(side==2)-(side==3)));
+    contrast*=0.25f;
+    const float novelty=arm.visits>0 && probe.pixel==arm.pixel ? relativeRgbDifference(rgb,probe.rgb):0;
+    const int r=rgb&255,g=(rgb>>8)&255,b=(rgb>>16)&255;
+    unsigned packed=0;float sensitivity=0,selectedSupport=0;
+    for(int k=0;k<VoteCount;++k) {
+        const int v=r*static_cast<int>(weights[weightIndex(arm.pixel,0,k)])
+            +g*static_cast<int>(weights[weightIndex(arm.pixel,1,k)])
+            +b*static_cast<int>(weights[weightIndex(arm.pixel,2,k)]);
+        const int vote=(v>0)-(v<0); // Ungated counterfactual: dark neurons get observed too.
+        packed|=static_cast<unsigned>(vote+1)<<(k*2);
+        const float delta=parameters->rawVoteWeight[k]*vote;
+        const float impact=fabsf(delta)*decision->posterior[k]*(1-decision->posterior[k]);
+        sensitivity+=impact;
+        if((decision->selectedMask & (1u<<k)) && delta>0) selectedSupport=fmaxf(selectedSupport,impact);
+    }
+    const float reward=fminf(4,sensitivity/VoteCount*placementDiversity(packed)+0.1f*selectedSupport
+        +0.025f*contrast+0.015f*novelty);
+    const float alpha=1.0f/fminf(16,1+arm.visits);
+    arm.utility+=(reward-arm.utility)*alpha;
+    arm.secondMoment+=(reward*reward-arm.secondMoment)*alpha;
+    arm.visits=fminf(1'000'000,1+arm.visits);
+    probe=PlacementProbe{arm.pixel,packed,rgb,contrast,novelty,reward,alpha};
+    if(a==0) ++state.rounds;
+}
+__global__ void supervisePlacement(SpikePlacementTile* placement,const PlacementProbe* probes,
+    const DecisionOutput* decision,const DecisionParameters* parameters,const int* valid,const unsigned* label) {
+    if(!valid || !*valid || !decision->valid) return;
+    const int tile=blockIdx.x*4+(threadIdx.x>>5),a=threadIdx.x&31;
+    if(a>=SpikePlacementScouts) return;
+    auto& arm=placement[tile].arms[a];const auto& probe=probes[tile*SpikePlacementScouts+a];
+    if(arm.pixel!=probe.pixel || !arm.visits) return;
+    float gain=0,hit=0;
+    for(int k=0;k<VoteCount;++k) {
+        const int vote=static_cast<int>((probe.packed>>(2*k))&3)-1;
+        const float delta=parameters->rawVoteWeight[k]*vote/NeuronCount;
+        const float ce=crossEntropyGain(decision->posterior[k],static_cast<float>((*label>>k)&1u),delta)*NeuronCount;
+        gain+=ce;
+        if((decision->selectedMask & *label & (1u<<k)) && vote>0) hit=fmaxf(hit,ce);
+    }
+    const float reward=fminf(4,fmaxf(-4,gain/VoteCount*placementDiversity(probe.packed)+0.25f*hit
+        +0.025f*probe.contrast+0.015f*probe.novelty));
+    // Replace this observation's proxy with actual causal human feedback. No
+    // second visit, invented label, neural update or extra optimizer step.
+    arm.utility+=probe.alpha*(reward-probe.proxy);
+    arm.secondMoment=fmaxf(0,arm.secondMoment+probe.alpha*(reward*reward-probe.proxy*probe.proxy));
+    if(a==0) ++placement[tile].supervisedRounds;
+}
+
 }
 struct VabpnnSpikeModel {
     VabpnnBlockModel* blocks=nullptr;
@@ -306,6 +487,9 @@ struct VabpnnSpikeModel {
     vabpnn::SpikePixelStatistics* statistics=nullptr;
     vabpnn::SpikeCounters* counters=nullptr;
     Clock* clock=nullptr;
+    SpikePlacementTile* placement=nullptr;
+    PlacementProbe* probes=nullptr;
+    bool placementPending=false;
     float* scores=nullptr;
     float* membrane=nullptr;
     float* refractory=nullptr;
@@ -342,14 +526,13 @@ void buildLong(VabpnnSpikeModel* m,cudaStream_t stream) {
     longCount<<<1,1,0,stream>>>(m->longRows,m->counters);
 }
 void rebuildTopology(VabpnnSpikeModel* m,cudaStream_t stream,unsigned epoch) {
-    refreshScores<<<(NeuronCount+255)/256,256,0,stream>>>(m->statistics,m->scores);
-    localOutgoing<<<SpikeTiles,256,0,stream>>>(m->outgoing,m->scores,m->config,epoch,false);
+    localOutgoing<<<SpikeTiles,256,0,stream>>>(m->outgoing,m->scores,m->statistics,m->config,epoch,false);
     vabpnnRebuildSpikeLocalCsr(m,stream);
-    candidates<<<SpikeTiles,256,0,stream>>>(m->scores,m->keys,m->ids);
+    candidates<<<SpikeTiles,256,0,stream>>>(m->scores,m->placement,m->keys,m->ids);
     reduceChampions<<<VoteCount,256,0,stream>>>(m->blockChampions,m->champions);
     check(cub::DeviceRadixSort::SortPairsDescending(m->temporary,m->sortBytes,m->keys,m->sortedKeys,
         m->ids,m->sortedIds,SpikeTiles,0,32,stream),"sort high-contribution candidates");
-    selectAnchors<<<1,1,0,stream>>>(m->sortedKeys,m->sortedIds,m->champions,m->config,m->scores,m->anchors,m->counters);
+    selectAnchors<<<1,128,0,stream>>>(m->sortedKeys,m->sortedIds,m->champions,m->config,m->scores,m->anchors,m->counters);
     buildLong(m,stream);
     check(cudaGetLastError(),"rebuild bounded spike topology");
 }
@@ -360,6 +543,8 @@ VabpnnSpikeModel* vabpnnCreateSpikeModel(cudaStream_t stream) {
         allocate(m->config,1,m,"allocate spike config"); allocate(m->counters,1,m,"allocate spike counters");
         allocate(m->clock,1,m,"allocate spike clock"); allocate(m->statistics,NeuronCount,m,"allocate contribution statistics");
         allocate(m->scores,NeuronCount,m,"allocate cached contribution scores");
+        allocate(m->placement,SpikeTiles,m,"allocate persistent placement learners");
+        allocate(m->probes,SpikeTiles*SpikePlacementScouts,m,"allocate GPU-only placement probes");
         allocate(m->membrane,NeuronCount,m,"allocate membrane"); allocate(m->refractory,NeuronCount,m,"allocate refractory");
         allocate(m->signals[0],NeuronCount,m,"allocate synchronous signals"); allocate(m->signals[1],NeuronCount,m,"allocate synchronous signals");
         allocate(m->packedVotes,NeuronCount,m,"allocate packed neuron votes");
@@ -389,12 +574,14 @@ VabpnnSpikeModel* vabpnnCreateSpikeModel(cudaStream_t stream) {
         check(cudaMemsetAsync(m->anchors,0xff,SpikeAnchorLimit*sizeof(unsigned),stream),"initialize anchors");
         check(cudaMemsetAsync(m->champions,0xff,VoteCount*sizeof(unsigned),stream),"initialize champions");
         check(cudaMemsetAsync(m->packedVotes,0x55,NeuronCount*sizeof(unsigned),stream),"initialize neutral votes");
+        check(cudaMemsetAsync(m->probes,0xff,SpikeTiles*SpikePlacementScouts*sizeof(PlacementProbe),stream),"invalidate placement probes");
+        initializePlacement<<<(SpikeTiles+255)/256,256,0,stream>>>(m->placement);
         initializeConfig<<<1,1,0,stream>>>(m->config);
         std::array<int2,SpikeNearCount> offsets; int at=0;
         for(int y=-SpikeRadius;y<=SpikeRadius;++y) for(int x=-SpikeRadius;x<=SpikeRadius;++x)
             if(std::abs(x)+std::abs(y)>0 && std::abs(x)+std::abs(y)<=SpikeRadius) offsets[at++]={x,y};
         check(cudaMemcpyToSymbolAsync(nearby,offsets.data(),sizeof(offsets),0,cudaMemcpyHostToDevice,stream),"initialize Manhattan offsets");
-        localOutgoing<<<SpikeTiles,256,0,stream>>>(m->outgoing,m->scores,m->config,0,true);
+        localOutgoing<<<SpikeTiles,256,0,stream>>>(m->outgoing,m->scores,m->statistics,m->config,0,true);
         resetLocalCount<<<1,1,0,stream>>>(m->counters);
         localCsr<<<SpikeTiles,256,0,stream>>>(m->outgoing,m->localRows,m->localColumns,m->counters);
         m->blocks=vabpnnCreateBlockModel(stream); m->bytes+=vabpnnBlockModelBytes(m->blocks);
@@ -409,7 +596,7 @@ void vabpnnDestroySpikeModel(VabpnnSpikeModel* m) noexcept {
     void* allocations[]={m->config,m->counters,m->clock,m->statistics,m->membrane,m->refractory,
         m->signals[0],m->signals[1],m->packedVotes,m->outgoing,m->localRows,m->localColumns,m->membership,
         m->longRows,m->cursor,m->longColumns,m->anchors,m->champions,m->keys,m->sortedKeys,m->ids,m->sortedIds,
-        m->blockChampions,m->temporary,m->scores};
+        m->blockChampions,m->temporary,m->scores,m->placement,m->probes};
     vabpnnDestroyBlockModel(m->blocks);
     for(void* pointer:allocations) if(pointer) cudaFree(pointer);
     if(m->initialized) cudaEventDestroy(m->initialized); delete m;
@@ -418,7 +605,7 @@ std::uint64_t vabpnnSpikeModelBytes(const VabpnnSpikeModel* m) noexcept { return
 vabpnn::DeviceSpikeView vabpnnSpikeModelView(const VabpnnSpikeModel* m) {
     return {m->config,m->counters,m->signals[m->current],m->membrane,m->refractory,m->statistics,m->packedVotes,
         m->outgoing,m->localRows,m->localColumns,m->longRows,m->longColumns,m->anchors,m->membership,m->champions,
-        vabpnnBlockModelView(m->blocks).controls};
+        vabpnnBlockModelView(m->blocks).controls,m->placement};
 }
 VabpnnBlockModel* vabpnnSpikeBlockModel(const VabpnnSpikeModel* m) { return m ? m->blocks:nullptr; }
 vabpnn::SpikeConfig* vabpnnMutableSpikeConfig(VabpnnSpikeModel* m,cudaStream_t s) { ready(m,s); return m->config; }
@@ -449,9 +636,33 @@ void vabpnnRecordSpikeVotes(VabpnnSpikeModel* m,cudaStream_t s) {
 void vabpnnObserveSpikeContribution(VabpnnSpikeModel* m,const vabpnn::DecisionOutput* decision,
     const vabpnn::DecisionParameters* parameters,const int* valid,const std::uint32_t* label,cudaStream_t s) {
     if(!m) return;
-    contributions<<<SpikeTiles,256,0,s>>>(m->packedVotes,m->statistics,m->config,decision,parameters,valid,label,m->blockChampions,m->counters,m->scores);
+    contributions<<<SpikeTiles,256,0,s>>>(m->packedVotes,m->statistics,m->config,decision,parameters,valid,label,m->blockChampions,m->counters,m->scores,false);
+    if(m->placementPending) {
+        supervisePlacement<<<SpikeTiles/4,128,0,s>>>(m->placement,m->probes,decision,parameters,valid,label);
+        m->placementPending=false;
+    }
     check(cudaGetLastError(),"observe supervised cross-entropy contributions and operation hits");
 }
+
+void vabpnnObserveSpikePrediction(const VabpnnGpuFrame& frame) {
+    auto* m=frame.spikeModel;
+    if(!m || !frame.decisionModel || !frame.neuronModel) return;
+    const auto decision=vabpnnDecisionModelView(frame.decisionModel);
+    if(frame.evaluationMode || !frame.onlineModel)
+        contributions<<<SpikeTiles,256,0,frame.stream>>>(m->packedVotes,m->statistics,m->config,
+            decision.output,decision.parameters,nullptr,nullptr,m->blockChampions,m->counters,m->scores,true);
+    if(m->hostPredictions && m->hostPredictions%5==0) {
+        probePlacement<<<SpikeTiles/4,128,0,frame.stream>>>(frame,m->placement,m->probes,m->config,
+            vabpnnNeuronModelView(frame.neuronModel).weights,decision.output,decision.parameters);
+        m->placementPending=true;
+    }
+    check(cudaGetLastError(),"update dynamic salience and ungated placement scouts");
+}
+vabpnn::ModelPart vabpnnSpikePlacementCheckpointPart(VabpnnSpikeModel* m) {
+    if(!m) throw std::invalid_argument("Spike placement model missing");
+    return {m->placement,SpikeTiles*sizeof(SpikePlacementTile)};
+}
+
 void vabpnnResetSpikeHistory(VabpnnSpikeModel* m,cudaStream_t s) {
     ready(m,s);
     check(cudaMemsetAsync(m->clock,0,sizeof(Clock),s),"reset spike clock");
@@ -459,7 +670,8 @@ void vabpnnResetSpikeHistory(VabpnnSpikeModel* m,cudaStream_t s) {
     check(cudaMemsetAsync(m->refractory,0,NeuronCount*sizeof(float),s),"reset refractory");
     for(auto signal:m->signals) check(cudaMemsetAsync(signal,0,NeuronCount,s),"reset spikes");
     check(cudaMemsetAsync(m->packedVotes,0x55,NeuronCount*sizeof(unsigned),s),"clear cached neutral votes");
-    m->current=0; m->hostPredictions=0;
+    m->current=0; m->hostPredictions=0;m->placementPending=false;
+    check(cudaMemsetAsync(m->probes,0xff,SpikeTiles*SpikePlacementScouts*sizeof(PlacementProbe),s),"invalidate transient placement probes");
     vabpnnResetBlockHistory(m->blocks,s);
 }
 std::size_t vabpnnSpikeCheckpointParts(VabpnnSpikeModel* m,vabpnn::ModelPart* parts) {
@@ -474,3 +686,4 @@ void vabpnnResumeSpikeModel(VabpnnSpikeModel* m,cudaStream_t s) {
     refreshScores<<<(NeuronCount+255)/256,256,0,s>>>(m->statistics,m->scores);
     check(cudaGetLastError(),"resume topology without cached activations");
 }
+

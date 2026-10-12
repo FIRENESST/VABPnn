@@ -19,7 +19,7 @@ public final class ScopeRenderTest {
     }
     private static int changedMotionPixels(BufferedImage left,BufferedImage right) {
         int count=0;
-        for(int y=882;y<954;y++) for(int x=300;x<746;x++)
+        for(int y=914;y<986;y++) for(int x=300;x<746;x++)
             if(left.getRGB(x,y)!=right.getRGB(x,y)) count++;
         return count;
     }
@@ -56,6 +56,12 @@ public final class ScopeRenderTest {
         values[BLOCK_SELECTED+3]=.963f; values[BLOCK_SELECTED+4]=.0032f;
         values[BLOCK_SELECTED+5]=1.082f; values[BLOCK_SELECTED+6]=1.041f;
         for(int t=0;t<TILES;t++) values[BLOCK_SCORE+t]=(float)(.13*Math.sin(t%120*.13+t/120*.19));
+        ints[MEME_DATA]=1;ints[MEME_DATA+1]=123;ints[MEME_DATA+2]=2;ints[MEME_DATA+3]=412;
+        ints[MEME_DATA+4]=34;ints[MEME_DATA+5]=5400;ints[MEME_DATA+6]=1250;
+        values[MEME_SELECTED]=.83f;values[MEME_SELECTED+1]=.74f;
+        values[MEME_SELECTED+2]=.31f;values[MEME_SELECTED+4]=.91f;
+        for(int k=0;k<ACTIONS;k++)values[MEME_EVIDENCE+k]=(k%2==0 ? .43f:-.22f);
+        for(int t=0;t<TILES;t++)values[MEME_MAP+t]=(float)(.5+.4*Math.sin(t*.06));
         var snapshot=new ScopeSnapshot(meta,values,ints,System.nanoTime());
         meta[0]=999; values[POSTERIOR]=0; ints[5]=0;
         require(snapshot.frame()==420 && snapshot.probability(0)>.8 && snapshot.selected(0),"immutable publication");
@@ -68,7 +74,7 @@ public final class ScopeRenderTest {
         var tile=new AtomicInteger(snapshot.tile());
         var motion=new AtomicReference<>(MouseMotionTracker.EMPTY);
         var hierarchy=new AtomicReference<>(new NetworkMonitor.Hierarchy(412,7680*76,3,21,84,1512,1,1,1,7652,104,7,0,420));
-        require(FLOATS==31031 && INTS==2589,"Java/CUDA block scope layout agreement");
+        require(FLOATS==38740 && INTS==2599,"Java/CUDA block scope layout agreement");
         Path preview=Path.of("build/native/network-scope-preview.png"); java.nio.file.Files.createDirectories(preview.getParent());
         SwingUtilities.invokeAndWait(() -> {
             try {
@@ -86,6 +92,8 @@ public final class ScopeRenderTest {
                 panel.dispatchEvent(new MouseEvent(panel,MouseEvent.MOUSE_CLICKED,System.currentTimeMillis(),0,600,116,1,false));
                 require(snapshot.value(BLOCK_SCORE+snapshot.tile())!=0 && snapshot.value(BLOCK_SELECTED+3)>.9f,
                         "high-level score and selected controller are real immutable snapshot fields");
+                panel.dispatchEvent(new MouseEvent(panel,MouseEvent.MOUSE_CLICKED,System.currentTimeMillis(),0,600,116,1,false));
+                require(snapshot.discrete[MEME_DATA+3]==412 && snapshot.value(MEME_EVIDENCE)==.43f,"meme scope uses immutable actual-input fields");
                 render(panel); // Warm up desktop font discovery before the 250 ms freshness assertion.
                 var example=new MouseMotionTracker.Sample(System.nanoTime(),33_333_333,true,12.5,-7.25,4.25,-2.5,3.75,-2.5);
                 motion.set(example);
@@ -100,6 +108,18 @@ public final class ScopeRenderTest {
                 motion.set(new MouseMotionTracker.Sample(System.nanoTime(),33_333_333,true,12.5,-7.25,4.25,-2.5,3.75,-2.5));
                 state.set(new NetworkMonitor.Status(false,false,false,"暂停"));
                 require(changedMotionPixels(render(panel),zero)==0,"paused mouse deltas render as zero");
+                
+                state.set(new NetworkMonitor.Status(true,false,false,"仅预测",0,0,0,0,true));
+                motion.set(new MouseMotionTracker.Sample(System.nanoTime(),33_333_333,true,0,0,4.25,-2.5,3.75,-2.5));
+                var predictedOnly=render(panel);
+                motion.set(MouseMotionTracker.EMPTY);
+                var predictionZero=render(panel);
+                int proposed=0,executed=0;
+                for(int y=937;y<959;y++)for(int x=300;x<746;x++)
+                    if(predictedOnly.getRGB(x,y)!=predictionZero.getRGB(x,y))proposed++;
+                for(int y=960;y<984;y++)for(int x=300;x<746;x++)
+                    if(predictedOnly.getRGB(x,y)!=predictionZero.getRGB(x,y))executed++;
+                require(proposed>40 && executed==0,"read-only mode shows proposals while executed deltas remain zero, even with inactive game input");
                 panel.setSize(ScopePanel.LOGICAL_WIDTH/2,ScopePanel.LOGICAL_HEIGHT/2);
                 panel.dispatchEvent(new MouseEvent(panel,MouseEvent.MOUSE_CLICKED,System.currentTimeMillis(),0,28,79,1,false));
                 require(tile.get()==6*120+10,"resized panel retains overview hit coordinates");
@@ -111,14 +131,15 @@ public final class ScopeRenderTest {
         require(error.get()==null && monitor.visible(),"desktop scope opens");
         var field=NetworkMonitor.class.getDeclaredField("window"); field.setAccessible(true);
         var window=(JFrame)field.get(monitor);
-        require(!window.getFocusableWindowState() && !window.isAutoRequestFocus(),"window cannot take game focus");
+        require(!window.isAlwaysOnTop() && window.getFocusableWindowState() && !window.isAutoRequestFocus(),"ordinary non-topmost window without automatic focus requests");
         monitor.show(false); SwingUtilities.invokeAndWait(() -> {});
         require(!window.isVisible(),"F7 hide leaves model independent");
         monitor.show(true); SwingUtilities.invokeAndWait(() -> {});
         require(window.isVisible(),"hidden scope can reopen");
         monitor.close(); SwingUtilities.invokeAndWait(() -> {});
         require(!window.isDisplayable(),"timer/window shutdown releases desktop resources");
-        System.out.println("PASS: immutable telemetry, stale data, map/tile interactions, mouse delta rendering/clearing, scaled hit coordinates, no-focus window, hide/reopen/close.");
+        System.out.println("PASS: immutable telemetry, stale data, map/tile interactions, mouse delta rendering/clearing, scaled hit coordinates, ordinary non-topmost window, hide/reopen/close.");
         System.out.println("UI preview (synthetic neural values): "+preview.toAbsolutePath());
     }
 }
+

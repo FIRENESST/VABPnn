@@ -2,6 +2,7 @@
 #include "GpuFrame.h"
 #include "ModelSnapshot.h"
 struct VabpnnBlockModel;
+struct VabpnnMemeModel;
 namespace vabpnn {
 constexpr int BlockCount=120*64, BlockFeatures=16, BlockOutputs=4, BlockWeights=BlockFeatures*BlockOutputs;
 constexpr int BlockControlEvery=5;
@@ -40,6 +41,7 @@ struct DeviceBlockView {
 }
 VabpnnBlockModel* vabpnnCreateBlockModel(cudaStream_t stream);
 void vabpnnDestroyBlockModel(VabpnnBlockModel* model) noexcept;
+VabpnnMemeModel* vabpnnBlockMemeModel(const VabpnnBlockModel* model);
 std::uint64_t vabpnnBlockModelBytes(const VabpnnBlockModel* model) noexcept;
 vabpnn::DeviceBlockView vabpnnBlockModelView(const VabpnnBlockModel* model);
 vabpnn::BlockPersistent* vabpnnMutableBlockPersistent(VabpnnBlockModel* model,cudaStream_t stream);

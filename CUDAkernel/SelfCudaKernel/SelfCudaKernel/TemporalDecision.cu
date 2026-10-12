@@ -1,4 +1,5 @@
 #include "TemporalDecision.h"
+#include "JepaMotion.h"
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -20,9 +21,14 @@ struct PositionState {
     std::uint64_t sampleNanos, epoch;
     int ready;
 };
+struct BayesianMotionCache {
+    std::uint64_t frameId;
+    float features[BayesianMotionFeatures],predicted[2],scale;
+    int ready,learningFrozen;
+};
 constexpr std::uint64_t DecisionBytes = sizeof(DecisionParameters) + sizeof(DecisionConstraints)
     + sizeof(DecisionState) + sizeof(DecisionOutput) + sizeof(MotionProposal)
-    + sizeof(PositionState) + sizeof(DecisionPositionAdapter);
+    + sizeof(PositionState) + sizeof(DecisionPositionAdapter)+sizeof(BayesianMotionCache);
 static_assert(std::is_trivially_copyable<DecisionParameters>::value, "GPU parameter object.");
 static_assert(std::is_trivially_copyable<DecisionOutput>::value, "GPU result object.");
 
@@ -68,6 +74,7 @@ __device__ void initializeMatrix(float* values, int count, unsigned int seed, fl
 }
 __global__ void initializeParameters(DecisionParameters* p, DecisionConstraints* constraints) {
     // Buffer was zeroed first. Nonzero representations; neutral evidence/decision heads.
+    p->enabledKChoices=DecisionKChoices;
     initializeMatrix(&p->nodeEmbedding[0][0], VoteCount * DecisionWidth, 11, 0.1f);
     initializeMatrix(p->voteEmbedding, DecisionWidth, 23, 0.25f);
     initializeMatrix(&p->timeEmbedding[0][0], DecisionTimeFeatures * DecisionWidth, 37, 0.02f);
@@ -136,8 +143,9 @@ __global__ void decide(const std::int32_t* votes, const DecisionParameters* p,
                        const DecisionConstraints* constraints, const MotionProposal* motion, DecisionState* state,
                        DecisionOutput* result, std::uint64_t frameId, std::uint64_t nanos,
                        PlayerPositionSample position, PositionState* positionState,
-                       const DecisionPositionAdapter* adapter) {
-    // One 32-thread block; all threads reach all barriers. Each of 13 lanes owns a graph node.
+                       const DecisionPositionAdapter* adapter, const DecisionMinuteOutput* minutes,
+                       const DecisionMinutePersistent* minuteParameters, bool continuousActions) {
+    // One 32-thread block; all threads reach all barriers. Each of 15 lanes owns a graph node.
     __shared__ float input[VoteCount][DecisionWidth], query[VoteCount][DecisionWidth];
     __shared__ float hidden[VoteCount][DecisionWidth];
     __shared__ float keys[DecisionHistory][VoteCount][DecisionWidth];
@@ -276,8 +284,10 @@ __global__ void decide(const std::int32_t* votes, const DecisionParameters* p,
         }
         if(result->positionValid) for(int f=0;f<PositionFeatures;++f)
             evidence+=adapter->evidence[i][f]*result->positionFeatures[f];
+        evidence+=minutes->evidence[i];
         const float temperature = softplus(p->logGateTemperature);
-        nodeValid[i] = nodeValid[i] && isfinite(evidence) && isfinite(thresholdLogit)
+        nodeValid[i] = nodeValid[i] && minutes->valid && minutes->frameId==frameId
+            && isfinite(evidence) && isfinite(thresholdLogit)
             && isfinite(temperature) && temperature > 0;
         const float posterior = nodeValid[i] ? sigmoid(logit(result->prior[i]) + evidence) : result->prior[i];
         result->logLikelihoodRatio[i] = nodeValid[i] ? evidence : 0;
@@ -294,7 +304,7 @@ __global__ void decide(const std::int32_t* votes, const DecisionParameters* p,
         for (int j = 0; j < VoteCount; ++j) {
             result->valid &= nodeValid[j];
             result->selectedIndices[j] = -1;
-            if (result->confidence[j] > result->threshold[j]) result->eligibleMask |= 1u << j;
+            if (continuousActions || result->confidence[j] > result->threshold[j]) result->eligibleMask |= 1u << j;
         }
         float features[DecisionKFeatures]{};
         for (int d = 0; d < DecisionWidth; ++d) {
@@ -306,15 +316,18 @@ __global__ void decide(const std::int32_t* votes, const DecisionParameters* p,
             features[DecisionWidth + VoteCount + j] = result->softEligibility[j];
         }
         for (int d = 0; d < DecisionKFeatures; ++d) result->kFeatures[d] = features[d];
+        const int activeK=isfinite(p->enabledKChoices) ? static_cast<int>(fminf(DecisionKChoices,fmaxf(1,p->enabledKChoices))):1;
+        result->valid &= isfinite(p->enabledKChoices);
         float logits[DecisionKChoices], maximum = -INFINITY;
         for (int k = 0; k < DecisionKChoices; ++k) {
             float x = p->kBias[k];
             for (int d = 0; d < DecisionKFeatures; ++d) x += features[d] * p->kWeight[k][d];
             if(result->positionValid) for(int f=0;f<PositionFeatures;++f)
                 x+=adapter->k[k][f]*result->positionFeatures[f];
-            logits[k] = x;
+            x+=minutes->kLogits[k];
+            logits[k] = k<activeK ? x:-INFINITY;
             if (!isfinite(x)) result->valid = 0;
-            if (k == 0 || x > maximum) { maximum = x; result->requestedK = k; }
+            if (k<activeK && (k == 0 || x > maximum)) { maximum = x; result->requestedK = k; }
         }
         float denominator = 0;
         for (int k = 0; k < DecisionKChoices; ++k) {
@@ -349,8 +362,67 @@ __global__ void decide(const std::int32_t* votes, const DecisionParameters* p,
             result->positionValid ? positionState->sampleNanos:0, result->positionValid ? positionState->epoch:0,
             adapter->steps, result->positionValid ? positionState->previous[0]:0,
             result->positionValid ? positionState->previous[1]:0, result->positionValid ? positionState->previous[2]:0,
-            result->positionValid};
+            result->positionValid,minutes->elapsedMinutes,minuteParameters->steps,
+            static_cast<std::uint32_t>(minutes->buckets),minuteParameters->motion.steps};
         state->started = 1; state->lastCaptureNanos = nanos;
+    }
+}
+// Bayesian probabilities condition the displacement value as well as action selection.
+// A learned residual preserves old JEPA rates at zero initialization; there is no
+// unconditional multiplication by confidence that would shrink every mouse movement.
+__global__ void fuseBayesianMotion(DecisionOutput* decision,JepaOutput* jepa,const JepaConfig* cfg,
+        const BayesianMotionPersistent* p,BayesianMotionCache* cache,bool frozen) {
+    cache->ready=0;cache->frameId=decision->frameId;cache->learningFrozen=frozen;
+    if(!decision->valid || !jepa->valid || !jepa->pairReady || decision->frameId!=jepa->frameId
+            || !isfinite(cfg->maxMouseUnitsPerSecond) || cfg->maxMouseUnitsPerSecond<=0)return;
+    cache->scale=cfg->maxMouseUnitsPerSecond;
+    for(int k=0;k<VoteCount;++k) {
+        cache->features[k]=2*decision->posterior[k]-1;
+        cache->features[VoteCount+k]=2*decision->prior[k]-1;
+    }
+    cache->features[VoteCount*2]=jepa->headRateX/cache->scale;
+    cache->features[VoteCount*2+1]=jepa->headRateY/cache->scale;
+    cache->features[BayesianMotionFeatures-1]=1;
+    float rates[2]={jepa->headRateX,jepa->headRateY};
+    for(int axis=0;axis<2;++axis) {
+        float residual=0;
+        for(int f=0;f<BayesianMotionFeatures;++f)residual+=p->weights[axis][f]*cache->features[f];
+        cache->predicted[axis]=rates[axis]/cache->scale+residual;
+        rates[axis]=fminf(cache->scale,fmaxf(-cache->scale,rates[axis]+cache->scale*residual));
+        if(!isfinite(residual) || !isfinite(cache->predicted[axis])) {
+            decision->command.mouseDx=decision->command.mouseDy=0;
+            jepa->mouseDx=jepa->mouseDy=0;return;
+        }
+    }
+    cache->ready=1;
+    if(!jepa->motionActive)return; // Demonstration still caches features for real supervision.
+    const float dt=fminf(jepa->deltaSeconds,cfg->maxMotionDtSeconds);
+    const float dx=fminf(cfg->maxMouseDelta,fmaxf(-cfg->maxMouseDelta,rates[0]*dt));
+    const float dy=fminf(cfg->maxMouseDelta,fmaxf(-cfg->maxMouseDelta,rates[1]*dt));
+    jepa->rateX=rates[0];jepa->rateY=rates[1];jepa->mouseDx=dx;jepa->mouseDy=dy;
+    decision->command.mouseDx=(decision->selectedMask&actionBit(Action::MouseX)) ? dx:0;
+    decision->command.mouseDy=(decision->selectedMask&actionBit(Action::MouseY)) ? dy:0;
+}
+__global__ void trainBayesianMotion(BayesianMotionPersistent* p,const BayesianMotionCache* cache,
+        const DecisionOutput* decision,const int* active,const float* rateX,const float* rateY) {
+    if(!*active || !cache->ready || cache->learningFrozen || !decision->valid
+            || cache->frameId!=decision->frameId || !isfinite(*rateX) || !isfinite(*rateY)
+            || fabsf(*rateX)>cache->scale || fabsf(*rateY)>cache->scale)return;
+    __shared__ float gradients[2],bias1,bias2;
+    if(threadIdx.x==0) {
+        const float step=static_cast<float>(++p->steps);
+        bias1=1-powf(.9f,step);bias2=1-powf(.999f,step);
+        gradients[0]=.5f*(cache->predicted[0]-*rateX/cache->scale);
+        gradients[1]=.5f*(cache->predicted[1]-*rateY/cache->scale);
+    }
+    __syncthreads();
+    for(int at=threadIdx.x;at<2*BayesianMotionFeatures;at+=blockDim.x) {
+        const int axis=at/BayesianMotionFeatures,f=at%BayesianMotionFeatures;
+        const float g=fminf(1,fmaxf(-1,gradients[axis]*cache->features[f]));
+        const float m=p->first[axis][f]=.9f*p->first[axis][f]+.1f*g;
+        const float v=p->second[axis][f]=.999f*p->second[axis][f]+.001f*g*g;
+        p->weights[axis][f]=p->weights[axis][f]*(f==BayesianMotionFeatures-1 ? 1:.999997f)
+            -.0003f*(m/bias1)/(sqrtf(v/bias2)+1e-8f);
     }
 }
 } // namespace
@@ -363,12 +435,17 @@ struct VabpnnDecisionModel {
     vabpnn::DecisionPositionAdapter* position = nullptr;
     vabpnn::DecisionOutput* output = nullptr;
     vabpnn::MotionProposal* motion = nullptr;
+    VabpnnMinuteModel* minutes = nullptr;
+    BayesianMotionCache* bayesianMotion = nullptr;
     cudaEvent_t initialized = nullptr;
 };
 
 VabpnnDecisionModel* vabpnnCreateDecisionModel(cudaStream_t stream) {
     auto* model = new VabpnnDecisionModel();
     try {
+        model->minutes=vabpnnCreateMinuteModel(stream);
+        check(cudaMalloc(reinterpret_cast<void**>(&model->bayesianMotion),sizeof(BayesianMotionCache)),"allocate Bayesian mouse cache");
+        check(cudaMemsetAsync(model->bayesianMotion,0,sizeof(BayesianMotionCache),stream),"zero Bayesian mouse cache");
         check(cudaMalloc(reinterpret_cast<void**>(&model->parameters), sizeof(vabpnn::DecisionParameters)), "allocate decision parameters");
         check(cudaMalloc(reinterpret_cast<void**>(&model->constraints), sizeof(vabpnn::DecisionConstraints)), "allocate action constraints");
         check(cudaMalloc(reinterpret_cast<void**>(&model->state), sizeof(DecisionState)), "allocate temporal state");
@@ -394,6 +471,8 @@ void vabpnnDestroyDecisionModel(VabpnnDecisionModel* model) noexcept {
     if (!model) return;
     // Caller drains every consumer/update stream first; this covers initialization only.
     if (model->initialized) cudaEventSynchronize(model->initialized);
+    vabpnnDestroyMinuteModel(model->minutes);
+    if(model->bayesianMotion)cudaFree(model->bayesianMotion);
     if (model->parameters) cudaFree(model->parameters);
     if (model->constraints) cudaFree(model->constraints);
     if (model->state) cudaFree(model->state);
@@ -405,11 +484,12 @@ void vabpnnDestroyDecisionModel(VabpnnDecisionModel* model) noexcept {
     delete model;
 }
 std::uint64_t vabpnnDecisionModelBytes(const VabpnnDecisionModel* model) noexcept {
-    return model ? DecisionBytes : 0;
+    return model ? DecisionBytes+vabpnnMinuteModelBytes(model->minutes) : 0;
 }
 vabpnn::DeviceDecisionView vabpnnDecisionModelView(const VabpnnDecisionModel* model) {
     if (!model) throw std::invalid_argument("Decision model is not initialized");
-    return {model->parameters, model->constraints, model->output, &model->output->command, model->position};
+    return {model->parameters, model->constraints, model->output, &model->output->command, model->position,
+        vabpnnMinuteModelView(model->minutes)};
 }
 vabpnn::DecisionParameters* vabpnnMutableDecisionParameters(VabpnnDecisionModel* model, cudaStream_t stream) {
     if (!model) throw std::invalid_argument("Decision model is not initialized");
@@ -430,14 +510,37 @@ std::size_t vabpnnDecisionPositionCheckpointParts(VabpnnDecisionModel* model,vab
     parts[0]={model->position,sizeof(vabpnn::DecisionPositionAdapter)};
     return 1;
 }
+vabpnn::DecisionMinutePersistent* vabpnnMutableMinuteTimeline(VabpnnDecisionModel* model,cudaStream_t stream) {
+    if(!model)throw std::invalid_argument("Decision model is not initialized");
+    return vabpnnMutableMinuteModel(model->minutes,stream);
+}
+vabpnn::ModelPart vabpnnDecisionMinuteCheckpointPart(VabpnnDecisionModel* model) {
+    return vabpnnMinuteModelCheckpointPart(model->minutes);
+}
+void vabpnnTrainMinuteDecision(VabpnnDecisionModel* model,const int* active,const std::uint32_t* label,cudaStream_t stream) {
+    vabpnnTrainMinuteTimeline(model->minutes,model->parameters,model->output,active,label,stream);
+}
+void vabpnnTrainBayesianMotion(VabpnnDecisionModel* model,const int* active,
+        const float* rateX,const float* rateY,cudaStream_t stream) {
+    auto* p=vabpnnMutableMinuteTimeline(model,stream);
+    trainBayesianMotion<<<1,128,0,stream>>>(&p->motion,model->bayesianMotion,model->output,active,rateX,rateY);
+    check(cudaGetLastError(),"learn cached Bayesian JEPA displacement");
+}
 void vabpnnLaunchTemporalDecision(const VabpnnGpuFrame& frame,
                                   const std::int32_t* votes, VabpnnDecisionModel* model) {
     if (!model || !votes) throw std::invalid_argument("Invalid decision model or device vote vector");
     check(cudaStreamWaitEvent(frame.stream, model->initialized, 0), "wait for decision model");
+    vabpnnLaunchMinuteTimeline(frame,votes,model->minutes);
+    const auto minutes=vabpnnMinuteModelView(model->minutes);
     decide<<<1, 32, 0, frame.stream>>>(votes, model->parameters, model->constraints,
                                       model->motion, model->state, model->output, frame.frameId, frame.captureNanos,
-                                      frame.position,model->positionState,model->position);
-    check(cudaGetLastError(), "launch temporal Bayes decision");
+                                      frame.position,model->positionState,model->position,minutes.output,minutes.persistent,frame.evaluationMode);
+    if(frame.jepaModel) {
+        const auto jepa=vabpnnJepaModelView(frame.jepaModel);
+        fuseBayesianMotion<<<1,1,0,frame.stream>>>(model->output,const_cast<JepaOutput*>(jepa.output),jepa.config,
+            &minutes.persistent->motion,model->bayesianMotion,frame.evaluationMode);
+    }
+    check(cudaGetLastError(), "launch temporal Bayes decision and mouse conditioning");
 }
 vabpnn::MotionProposal* vabpnnMutableMotionProposal(VabpnnDecisionModel* model, cudaStream_t stream) {
     if (!model) throw std::invalid_argument("Decision model is not initialized");
@@ -452,8 +555,11 @@ void vabpnnResetDecisionState(VabpnnDecisionModel* model, cudaStream_t stream) {
     if (!model) throw std::invalid_argument("Decision model is not initialized");
     check(cudaStreamWaitEvent(stream, model->initialized, 0), "wait before decision reset");
     vabpnnClearMotionProposal(model, stream);
+    vabpnnResetMinuteHistory(model->minutes,stream);
+    check(cudaMemsetAsync(model->bayesianMotion,0,sizeof(BayesianMotionCache),stream),"reset Bayesian mouse observation");
     check(cudaMemsetAsync(model->state, 0, sizeof(DecisionState), stream), "reset temporal state");
     check(cudaMemsetAsync(model->output, 0, sizeof(vabpnn::DecisionOutput), stream), "reset decision output");
     check(cudaMemsetAsync(model->positionState, 0, sizeof(PositionState), stream), "reset position history");
 }
+
 

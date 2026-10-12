@@ -58,6 +58,60 @@ void verifyLocal(VabpnnSpikeModel* m,bool initial) {
     require(total==scalar(view.counters).localEdges,"CSR counter matches complete graph");
     require(initial || lower,"plasticity can remove connections");
 }
+
+unsigned referenceHash(unsigned x) {x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;return x^(x>>16);}
+__global__ void seedTopologyReference(SpikePixelStatistics* stats) {
+    const unsigned pixel=blockIdx.x*blockDim.x+threadIdx.x;if(pixel>=NeuronCount)return;
+    const unsigned tile=pixel/NeuronWidth/16*120+pixel%NeuronWidth/16;
+    const unsigned local=pixel/NeuronWidth%16*16+pixel%NeuronWidth%16;
+    stats[pixel]={1,0,0,static_cast<float>(tile*10+local%9),0}; // Exact half-integer importance.
+}
+void optimizedTopologyTest(VabpnnSpikeModel* m,VabpnnGpuFrame& frame) {
+    SpikeConfig config;put(vabpnnMutableSpikeConfig(m,frame.stream),config,frame.stream);
+    const auto previous=scalar(vabpnnSpikeModelView(m).counters).topologyUpdates;
+    vabpnnResetSpikeHistory(m,frame.stream);
+    seedTopologyReference<<<(NeuronCount+255)/256,256,0,frame.stream>>>(vabpnnMutableSpikeStatistics(m,frame.stream));
+    for(int i=0;i<6;++i) {frame.captureNanos+=20'000'000;vabpnnLaunchSpikeForward(frame);}
+    check(cudaStreamSynchronize(frame.stream));
+    const auto view=vabpnnSpikeModelView(m);
+    auto actual=download(view.localOutgoing,2*256*4);
+    for(unsigned tile=0;tile<2;++tile)for(unsigned local=0;local<256;++local) {
+        unsigned seed=referenceHash(config.seed ^ spikePixel(tile,local) ^ referenceHash(2));
+        const unsigned degree=seed%5;int targets[4]={-1,-1,-1,-1};
+        for(unsigned slot=0;slot<4;++slot) {
+            unsigned short expected=0;
+            if(slot<degree) {
+                seed=referenceHash(seed+slot+37);int target=seed&255,alternate=(seed>>8)&255;
+                if(alternate%9>target%9)target=alternate;
+                for(int attempt=0;attempt<6;++attempt) {
+                    bool duplicate=target==static_cast<int>(local);
+                    for(unsigned k=0;k<slot;++k)duplicate|=targets[k]==target;
+                    if(!duplicate)break;target=(target+1)&255;
+                }
+                targets[slot]=target;expected=static_cast<unsigned short>(target|((seed>>16)&3)<<8|0x400u);
+            }
+            require(actual[(tile*256+local)*4+slot]==expected,"Fused score/outgoing kernel exactly matches the prior generator");
+        }
+    }
+    // Independent original quadratic region/dedup rule, with distinct tile keys.
+    std::vector<unsigned> expected;std::set<unsigned> seen;
+    auto add=[&](unsigned id,bool balanced) {
+        if(seen.count(id))return;
+        unsigned count=0,region=id/NeuronWidth/64*30+id%NeuronWidth/64;
+        for(auto old:expected)count+=old/NeuronWidth/64*30+old%NeuronWidth/64==region;
+        if(balanced && count>=4)return;
+        seen.insert(id);expected.push_back(id);
+    };
+    for(int k=0;k<SpikeAnchorLimit/8;++k) {
+        const unsigned index=referenceHash(config.seed ^ referenceHash(static_cast<unsigned>(previous)+1) ^ referenceHash(k+1))%SpikeTiles;
+        add(spikePixel(SpikeTiles-1-index,8),false);
+    }
+    for(int k=0;k<SpikeTiles && expected.size()<SpikeAnchorLimit;++k)add(spikePixel(SpikeTiles-1-k,8),true);
+    require(download(view.anchorIds,expected.size())==expected && scalar(view.counters).anchors==expected.size(),
+        "Bounded hash/region tables preserve the exact prior ordered high-contribution selection");
+    std::puts("PASS: fused local scores/outgoing and bounded anchor lookup match independent prior arithmetic and quadratic selection exactly.");
+}
+
 void longTest(VabpnnSpikeModel* m,VabpnnGpuFrame& frame) {
     vabpnnResetSpikeHistory(m,frame.stream);
     auto view=vabpnnSpikeModelView(m); auto* stats=vabpnnMutableSpikeStatistics(m,frame.stream);
@@ -113,7 +167,7 @@ void contributionTest(VabpnnSpikeModel* m,VabpnnGpuFrame& frame) {
     auto* stats=vabpnnMutableSpikeStatistics(m,frame.stream);
     check(cudaMemsetAsync(stats,0,NeuronCount*sizeof(SpikePixelStatistics),frame.stream));
     const auto pixel=spikePixel(0,0); unsigned packed=0;
-    for(int k=0;k<13;++k) packed|=(k==0 ? 2u:1u)<<(k*2);
+    for(int k=0;k<VoteCount;++k) packed|=(k==0 ? 2u:1u)<<(k*2);
     check(cudaMemsetAsync(vabpnnMutableSpikeVoteCache(m,frame.stream),0x55,NeuronCount*sizeof(unsigned),frame.stream));
     put(vabpnnMutableSpikeVoteCache(m,frame.stream)+pixel,packed,frame.stream);
     SpikeConfig config; put(vabpnnMutableSpikeConfig(m,frame.stream),config,frame.stream);
@@ -133,9 +187,9 @@ void contributionTest(VabpnnSpikeModel* m,VabpnnGpuFrame& frame) {
     auto actual=scalar(stats+pixel);
     const double delta=2.0/NeuronCount;
     const double exact=(std::log1p(.75*std::expm1(-delta))+delta)*NeuronCount;
-    require(std::fabs(actual.crossEntropy-exact*.05/13)<1e-7,"stable leave-one-neuron-out cross entropy gain");
+    require(std::fabs(actual.crossEntropy-exact*.05/VoteCount)<1e-7,"stable leave-one-neuron-out cross entropy gain");
     require(std::fabs(actual.hit-exact*.05)<1e-6,"true-positive largest action-hit contribution");
-    require(std::fabs(actual.positive-.05/13)<1e-7 && std::fabs(actual.zero-.05*12/13)<1e-7,
+    require(std::fabs(actual.positive-.05/VoteCount)<1e-7 && std::fabs(actual.zero-.05*(VoteCount-1)/VoteCount)<1e-7,
             "EMA signed vote histogram for Shannon and Simpson");
     // Next topology tick reduces the per-action maxima to a global winner.
     vabpnnResetSpikeHistory(m,frame.stream);
@@ -174,7 +228,7 @@ void lifTest(VabpnnSpikeModel* m,VabpnnGpuFrame& frame,VabpnnNeuronModel* neuron
             "four typed CSR effects control stimulation and positive/negative release");
     // Use independent weights to ensure signed pulses actually gate the 13 raw votes.
     check(cudaMemsetAsync(vabpnnMutableNeuronWeights(neuron,frame.stream),0,ParameterCount,frame.stream));
-    for(int k=0;k<13;++k) for(unsigned pixel:{1u,2u,3u,4u})
+    for(int k=0;k<VoteCount;++k) for(unsigned pixel:{1u,2u,3u,4u})
         put(vabpnnMutableNeuronWeights(neuron,frame.stream)+weightIndex(pixel,0,k),TernaryWeight::Positive,frame.stream);
     vabpnnLaunchTernaryVotes(frame,neuron); check(cudaStreamSynchronize(frame.stream));
     for(auto total:download(vabpnnNeuronModelView(neuron).voteSums,13)) require(total==1,"raw totals = positive + positive - negative; quiet neurons abstain");
@@ -192,6 +246,86 @@ void lifTest(VabpnnSpikeModel* m,VabpnnGpuFrame& frame,VabpnnNeuronModel* neuron
     frame.captureNanos+=500'000'000; vabpnnLaunchSpikeForward(frame); check(cudaStreamSynchronize(frame.stream));
     for(auto s:download(vabpnnSpikeModelView(m).spikes,NeuronCount)) require(s==0,"long gaps reset rather than replay history");
 }
+
+void placementTest(VabpnnSpikeModel* m,VabpnnGpuFrame& frame,VabpnnNeuronModel* neuron) {
+    // A dim, silent pixel supports the teacher's action; its bright neighbor opposes
+    // it. Probe observations must discover the dim pixel without any LIF firing.
+    auto saved=frame;VabpnnDecisionModel* decision=vabpnnCreateDecisionModel(frame.stream);
+    unsigned char* image=nullptr;std::size_t pitch=0;
+    check(cudaMallocPitch(reinterpret_cast<void**>(&image),&pitch,NeuronWidth*4,NeuronHeight));
+    check(cudaMemset2DAsync(image,pitch,0,NeuronWidth*4,NeuronHeight,frame.stream));
+    frame.rgba=image;frame.rgbaPitch=pitch;frame.width=NeuronWidth;frame.height=NeuronHeight;frame.decisionModel=decision;
+    const unsigned dim=32*NeuronWidth+32,bright=dim+1,tile=2*120+2;
+    const std::array<unsigned char,4> darkColor{32,32,32,255},brightColor{240,240,240,255};
+    check(cudaMemcpyAsync(image+(NeuronHeight-1-32)*pitch+32*4,darkColor.data(),4,cudaMemcpyHostToDevice,frame.stream));
+    check(cudaMemcpyAsync(image+(NeuronHeight-1-32)*pitch+33*4,brightColor.data(),4,cudaMemcpyHostToDevice,frame.stream));
+    check(cudaMemsetAsync(vabpnnMutableNeuronWeights(neuron,frame.stream),0,ParameterCount,frame.stream));
+    put(vabpnnMutableNeuronWeights(neuron,frame.stream)+weightIndex(dim,0,0),TernaryWeight::Positive,frame.stream);
+    put(vabpnnMutableNeuronWeights(neuron,frame.stream)+weightIndex(bright,0,0),TernaryWeight::Negative,frame.stream);
+    auto view=vabpnnSpikeModelView(m);
+    check(cudaMemsetAsync(vabpnnMutableSpikeStatistics(m,frame.stream),0,NeuronCount*sizeof(SpikePixelStatistics),frame.stream));
+    auto placementPart=vabpnnSpikePlacementCheckpointPart(m);
+    check(cudaMemsetAsync(placementPart.device,0,placementPart.bytes,frame.stream));
+    SpikePlacementTile state{};
+    state.arms[0]={bright,0,0,0};state.arms[1]={dim,0,0,0};
+    for(int a=2;a<SpikePlacementScouts;++a) state.arms[a]={spikePixel(tile,a+20),-4,16,100};
+    put(static_cast<SpikePlacementTile*>(placementPart.device)+tile,state,frame.stream);
+    SpikeConfig config;config.maxAnchors=1;put(vabpnnMutableSpikeConfig(m,frame.stream),config,frame.stream);
+    DecisionParameters params{};params.rawVoteWeight[0]=2;
+    DecisionOutput output{};output.valid=1;for(float& p:output.posterior)p=.75f;
+    put(vabpnnMutableDecisionParameters(decision,frame.stream),params,frame.stream);
+    put(const_cast<DecisionOutput*>(vabpnnDecisionModelView(decision).output),output,frame.stream);
+    int* valid=nullptr;unsigned* label=nullptr;
+    check(cudaMalloc(reinterpret_cast<void**>(&valid),sizeof(int)));check(cudaMalloc(reinterpret_cast<void**>(&label),sizeof(unsigned)));
+    put(valid,1,frame.stream);put(label,1u,frame.stream);
+    vabpnnResetSpikeHistory(m,frame.stream);
+    for(int i=0;i<5;++i) {frame.captureNanos+=20'000'000;vabpnnLaunchSpikeForward(frame);vabpnnLaunchTernaryVotes(frame,neuron);}
+    check(cudaStreamSynchronize(frame.stream));
+    require(scalar(vabpnnSpikeModelView(m).spikes+dim)==0,"Dim candidate is genuinely silent, not a bright firing neuron");
+    vabpnnObserveSpikePrediction(frame);
+    vabpnnObserveSpikeContribution(m,vabpnnDecisionModelView(decision).output,vabpnnDecisionModelView(decision).parameters,valid,label,frame.stream);
+    check(cudaStreamSynchronize(frame.stream));state=scalar(static_cast<SpikePlacementTile*>(placementPart.device)+tile);
+    require(state.arms[1].utility>state.arms[0].utility && state.arms[1].visits==1 && state.supervisedRounds==1,
+        "Causal feedback rewards a dim positive contributor above a bright wrong voter");
+    frame.captureNanos+=20'000'000;vabpnnLaunchSpikeForward(frame);check(cudaStreamSynchronize(frame.stream));
+    require(scalar(vabpnnSpikeModelView(m).anchorIds)==dim,"Placement rank, not brightness, determines the actual CSR anchor");
+    put(label,0u,frame.stream);
+    for(int i=0;i<4;++i) {frame.captureNanos+=20'000'000;vabpnnLaunchSpikeForward(frame);vabpnnLaunchTernaryVotes(frame,neuron);}
+    vabpnnObserveSpikePrediction(frame);
+    vabpnnObserveSpikeContribution(m,vabpnnDecisionModelView(decision).output,vabpnnDecisionModelView(decision).parameters,valid,label,frame.stream);
+    check(cudaStreamSynchronize(frame.stream));state=scalar(static_cast<SpikePlacementTile*>(placementPart.device)+tile);
+    require(state.arms[0].utility>state.arms[1].utility && state.supervisedRounds==2,
+        "The same scout pool learns changed feedback instead of permanently fixing its location");
+    frame.captureNanos+=20'000'000;vabpnnLaunchSpikeForward(frame);check(cudaStreamSynchronize(frame.stream));
+    require(scalar(vabpnnSpikeModelView(m).anchorIds)==bright,"Changed learned utility relocates the real high-contribution anchor");
+    std::vector<ModelPart> parts{placementPart};
+    const auto path=(std::filesystem::current_path()/L"placement-v7-test.bin").wstring();
+    saveModelCheckpoint(path,parts,7);
+    check(cudaMemset(placementPart.device,0,placementPart.bytes));
+    require(loadModelCheckpoint(path,parts,false,7),"Placement values are independently persisted in version seven");
+    auto restored=scalar(static_cast<SpikePlacementTile*>(placementPart.device)+tile);
+    require(std::memcmp(&state,&restored,sizeof(state))==0,"Placement visits, feedback counts and values restored exactly");
+    std::filesystem::remove(path);
+    const auto before=restored.rounds;frame.evaluationMode=true;
+    for(int i=0;i<5;++i) {frame.captureNanos+=20'000'000;vabpnnLaunchSpikeForward(frame);vabpnnLaunchTernaryVotes(frame,neuron);vabpnnObserveSpikePrediction(frame);}
+    check(cudaStreamSynchronize(frame.stream));
+    require(scalar(static_cast<SpikePlacementTile*>(placementPart.device)+tile).rounds>before,
+        "Placement learning keeps probing and adapting in weight-frozen prediction");
+    // A restored pixel at ID zero must not compare the new scene against a
+    // fictitious black history just because a zeroed transient ID also equals zero.
+    check(cudaMemset2DAsync(image,pitch,64,NeuronWidth*4,NeuronHeight,frame.stream));
+    state=SpikePlacementTile{};state.arms[0]={0,0,0,10};
+    for(int a=1;a<SpikePlacementScouts;++a)state.arms[a]={spikePixel(tile,a+20),0,0,10};
+    put(static_cast<SpikePlacementTile*>(placementPart.device)+tile,state,frame.stream);
+    vabpnnResetSpikeHistory(m,frame.stream);
+    for(int i=0;i<5;++i) {frame.captureNanos+=20'000'000;vabpnnLaunchSpikeForward(frame);vabpnnLaunchTernaryVotes(frame,neuron);vabpnnObserveSpikePrediction(frame);}
+    check(cudaStreamSynchronize(frame.stream));
+    require(scalar(static_cast<SpikePlacementTile*>(placementPart.device)+tile).arms[0].utility==0,
+        "New-scene pixel zero has no fictitious RGB novelty after transient reset");
+    std::puts("PASS: ungated dim scout wins by contribution, changed feedback relocates anchors, v7 restores learned placement, frozen prediction keeps scouting; scene reset never invents novelty.");
+    cudaFree(valid);cudaFree(label);cudaFree(image);vabpnnDestroyDecisionModel(decision);frame=saved;
+}
+
 void legacyHeaderTest(cudaStream_t stream) {
     float* pointer=nullptr; check(cudaMalloc(reinterpret_cast<void**>(&pointer),sizeof(float)));
     put(pointer,3.5f,stream); std::vector<ModelPart> parts{{pointer,sizeof(float)}};
@@ -220,7 +354,7 @@ int main() {
         require(scalar(vabpnnSpikeModelView(model).counters).topologyUpdates==0,"exactly five predictions use initial adjacency");
         frame.captureNanos+=20'000'000; vabpnnLaunchSpikeForward(frame); check(cudaStreamSynchronize(stream));
         require(scalar(vabpnnSpikeModelView(model).counters).topologyUpdates==1,"rewire before sixth prediction");
-        verifyLocal(model,false); longTest(model,frame); contributionTest(model,frame); lifTest(model,frame,neuron);
+        verifyLocal(model,false); optimizedTopologyTest(model,frame);longTest(model,frame); contributionTest(model,frame); lifTest(model,frame,neuron);placementTest(model,frame,neuron);
         legacyHeaderTest(stream);
         std::printf("PASS: bounded local CSR, five-prediction plasticity, dense anchor clique/radius6, supervised CE/diversity/hit, signed LIF/SpMV, refractory/reset and checkpoint migration; spikeBytes=%llu\n",
             static_cast<unsigned long long>(vabpnnSpikeModelBytes(model)));
@@ -229,3 +363,4 @@ int main() {
     vabpnnDestroySpikeModel(model); vabpnnDestroyNeuronModel(neuron); if(image) cudaFree(image);
     if(stream) cudaStreamDestroy(stream); return result;
 }
+

@@ -1,6 +1,7 @@
 #pragma once
 #include "GpuFrame.h"
-#include "TemporalDecision.h"
+#include "NeuronModel.h"
+#include "ActionContracts.h"
 #include <type_traits>
 
 struct VabpnnJepaModel;
@@ -21,18 +22,20 @@ template<int Input, int Hidden, int Output> struct JepaMlp {
 };
 using JepaEncoder = JepaMlp<JepaInput, JepaHidden, JepaWidth>;
 using JepaPredictor = JepaMlp<JepaPredictInput, JepaHidden, JepaWidth>;
-using JepaMotionHead = JepaMlp<JepaMotionInput, JepaHidden, 2>;
-struct JepaParameters {
+template<int Actions> using JepaMotionHeadT=JepaMlp<JepaMoments*3+Actions+2,JepaHidden,2>;
+using JepaMotionHead=JepaMotionHeadT<VoteCount>;
+template<int Actions> struct JepaParametersT {
     JepaEncoder encoder;
     JepaPredictor predictor;
-    JepaMotionHead motion;
+    JepaMotionHeadT<Actions> motion;
 };
+using JepaParameters=JepaParametersT<VoteCount>;
 constexpr std::size_t JepaEncoderParameters = sizeof(JepaEncoder) / sizeof(float);
 constexpr std::size_t JepaSelfSupervisedParameters =
     (sizeof(JepaEncoder) + sizeof(JepaPredictor)) / sizeof(float);
 constexpr std::size_t JepaParameterCount = sizeof(JepaParameters) / sizeof(float);
 constexpr std::size_t JepaTotalParameterCount = JepaParameterCount + JepaEncoderParameters;
-static_assert(JepaParameterCount == 510210 && JepaTotalParameterCount == 555650, "Parameter budget.");
+static_assert(JepaParameterCount == 510722 && JepaTotalParameterCount == 556162, "Parameter budget.");
 static_assert(JepaTotalParameterCount < 50000000, "JEPA including EMA must be below 0.05B.");
 static_assert(std::is_standard_layout<JepaParameters>::value, "Contiguous float parameters.");
 // Parameters are large: allocate host copies on the heap, not the Windows default stack.
@@ -57,6 +60,7 @@ struct JepaMotionTarget {
 struct JepaOutput {
     std::uint64_t frameId, captureNanos, selfSupervisedSteps, motionSteps;
     float deltaSeconds, rateX, rateY, mouseDx, mouseDy;
+    float headRateX,headRateY; // Unconditioned JEPA rates, also cached in demonstration mode.
     float predictionLoss, variancePenalty, jepaLoss, gradientNorm, motionLoss;
     int valid, pairReady, motionActive, lastLearningValid;
 };
@@ -86,7 +90,7 @@ vabpnn::JepaConfig* vabpnnMutableJepaConfig(VabpnnJepaModel* model, cudaStream_t
 vabpnn::JepaMotionTarget* vabpnnMutableJepaMotionTarget(VabpnnJepaModel* model, cudaStream_t stream);
 
 // Same stream only; forward caches small GPU patch features, never retains frame-pool pointers.
-// votes contains the 13 raw int32 totals. proposal may be null for representation-only tests.
+// votes contains the 15 raw int32 totals. proposal may be null for representation-only tests.
 // Writes X/Y only; wheel remains available to the later wheel operator.
 void vabpnnLaunchJepaForward(const VabpnnGpuFrame& frame, const std::int32_t* votes,
                             VabpnnJepaModel* model, vabpnn::MotionProposal* proposal);
@@ -103,3 +107,4 @@ void vabpnnResetJepaHistory(VabpnnJepaModel* model, cudaStream_t stream);
 #include "ModelSnapshot.h"
 std::size_t vabpnnJepaCheckpointParts(VabpnnJepaModel* model, vabpnn::ModelPart* parts);
 void vabpnnResumeJepaOptimizer(VabpnnJepaModel* model, cudaStream_t stream);
+

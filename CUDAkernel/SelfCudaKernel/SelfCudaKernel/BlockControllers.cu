@@ -1,6 +1,7 @@
 #include "BlockControllers.h"
 #include "SpikeConnections.h"
 #include "OnlineLearning.h"
+#include "MemeState.h"
 #include <cub/block/block_radix_sort.cuh>
 #include <cmath>
 #include <cfloat>
@@ -57,9 +58,9 @@ __device__ float directGain(float probability,float label,float delta) {
 }
 __global__ void learn(BlockPersistent* p,Pending* pending,const Runtime* runtime,const int* votes,
                       const DecisionOutput* decision,const DecisionParameters* parameters,
-                      const unsigned* label,const unsigned* champions) {
-    if(!runtime->feedback) return; // Uniform per CUDA block.
+                      const unsigned* label,const unsigned* champions,DeviceMemeView meme) {
     const int tile=blockIdx.x,tid=threadIdx.x;
+    if(!runtime->feedback) {if(tid==0) meme.credit[tile].valid=0;return;}
     auto& s=p->state[tile]; auto& cache=pending[tile]; const auto& config=p->config;
     __shared__ float gain[32],agreement[32],coverage[32],weight[32],advantage,bias1,bias2;
     __shared__ int update;
@@ -95,6 +96,10 @@ __global__ void learn(BlockPersistent* p,Pending* pending,const Runtime* runtime
         s.agreement=.95f*s.agreement+.05f*consistency;
         s.coverage=.95f*s.coverage+.05f*participation;
         s.progress=.95f*s.progress+.05f*progress;
+        auto& credit=meme.credit[tile];credit.frame=decision->frameId;credit.advantage=advantage;
+        credit.contribution=contribution;credit.agreement=consistency;credit.coverage=participation;
+        credit.exploration=config.exploration;credit.valid=1;credit.exploring=cache.exploring;
+        for(int d=0;d<BlockOutputs;++d) credit.noise[d]=cache.noise[d];
         s.windowSum+=score; s.windowSquares+=score*score; s.windowCoverage+=participation;
         ++s.windowExamples; ++s.examples;
         for(int k=0;k<VoteCount;++k) {
@@ -131,7 +136,7 @@ __global__ void learn(BlockPersistent* p,Pending* pending,const Runtime* runtime
 __global__ void prepare(VabpnnGpuFrame frame,BlockPersistent* p,Pending* pending,BlockControl* controls,
                         const Message* oldMessages,Message* nextMessages,const float* membrane,
                         const signed char* spikes,const float* threshold,const DemoSample* demo,
-                        const DecisionOutput* decision) {
+                        const DecisionOutput* decision,DeviceMemeView meme) {
     const int tile=blockIdx.x,tid=threadIdx.x;
     const auto& config=p->config; auto& state=p->state[tile]; auto& cache=pending[tile];
     if(!validConfig(config) || !config.enabled) {
@@ -176,11 +181,18 @@ __global__ void prepare(VabpnnGpuFrame frame,BlockPersistent* p,Pending* pending
     if(neighbors) { neighborThreshold/=neighbors; neighborPolarity/=neighbors; neighborScore/=neighbors; }
     feature[13]=neighborThreshold; feature[14]=neighborPolarity; feature[15]=neighborScore;
     for(int d=0;d<BlockFeatures;++d) cache.feature[d]=isfinite(feature[d]) ? fminf(2.0f,fmaxf(-2.0f,feature[d])):0;
-    cache.exploring=demo && demo->active && !demo->modelControl && state.examples>=static_cast<std::uint64_t>(config.warmup);
+    cache.exploring=!frame.evaluationMode && demo && demo->active && !demo->modelControl && state.examples>=static_cast<std::uint64_t>(config.warmup);
     float latent[BlockOutputs]{};
+    auto& memeAction=meme.actions[tile];float memeMagnitude=0;
+    for(int k=0;k<MemeChannels;++k) {
+        const float feature=meme.persistent->config.enabled ? meme.features[tile*MemeChannels+k]:0;
+        memeAction.feature[k]=feature;memeMagnitude+=fabsf(feature);
+    }
+    memeAction.active=cache.exploring && memeMagnitude>1e-8f;
     for(int output=0;output<BlockOutputs;++output) {
         float mean=0;
         for(int d=0;d<BlockFeatures;++d) mean+=state.weights[output*BlockFeatures+d]*cache.feature[d];
+        for(int k=0;k<MemeChannels;++k) mean+=meme.persistent->policy[tile].weights[output*MemeChannels+k]*memeAction.feature[k];
         cache.noise[output]=cache.exploring ? gaussian(static_cast<unsigned>(frame.frameId)^blockHash(tile*17+output*43+1)):0;
         latent[output]=tanhf(mean+config.exploration*cache.noise[output]);
     }
@@ -212,7 +224,7 @@ __global__ void beginRank(BlockPersistent* p,Runtime* runtime) {
         p->counters.eligible=p->counters.candidates=p->counters.punished=0;
     }
 }
-__global__ void rankKeys(BlockPersistent* p,const Runtime* runtime,float* keys,unsigned* ids,unsigned char* punish) {
+__global__ void rankKeys(BlockPersistent* p,const Runtime* runtime,float* keys,unsigned* ids,unsigned char* punish,DeviceMemeView meme) {
     if(!runtime->rank) return;
     const int tile=blockIdx.x*blockDim.x+threadIdx.x;
     if(tile>=BlockCount) return;
@@ -230,6 +242,7 @@ __global__ void rankKeys(BlockPersistent* p,const Runtime* runtime,float* keys,u
     if(state.rankScore>state.bestScore+config.rankMargin) {
         state.bestScore=state.rankScore;
         for(int i=0;i<BlockWeights;++i) state.bestWeights[i]=state.weights[i];
+        for(int i=0;i<MemeWeights;++i) meme.persistent->policy[tile].bestWeights[i]=meme.persistent->config.enabled ? meme.persistent->policy[tile].weights[i]:0;
     }
 }
 __global__ void sortPopulation(const Runtime* runtime,const float* keys,const unsigned* ids,
@@ -277,7 +290,7 @@ __global__ void markRank(BlockPersistent* p,const Runtime* runtime,const float* 
         }
     } else state.poorStreak=0;
 }
-__global__ void evolve(BlockPersistent* p,Pending* pending,const Runtime* runtime,const unsigned char* punish) {
+__global__ void evolve(BlockPersistent* p,Pending* pending,const Runtime* runtime,const unsigned char* punish,DeviceMemeView meme) {
     const int tile=blockIdx.x,tid=threadIdx.x;
     if(!runtime->rank || !punish[tile]) return;
     auto& state=p->state[tile]; const auto& config=p->config;
@@ -298,6 +311,18 @@ __global__ void evolve(BlockPersistent* p,Pending* pending,const Runtime* runtim
         const float variation=config.mutation*(2*static_cast<float>(blockHash(seed)&0xffffu)/65535-1);
         state.weights[at]=fminf(1.5f,fmaxf(-1.5f,.9f*base+variation));
         state.first[at]=state.second[at]=pending[tile].gradient[at]=0;
+    }
+    if(meme.persistent->config.enabled) {
+        auto& policy=meme.persistent->policy[tile];
+        for(int at=tid;at<MemeWeights;at+=32) {
+            const float base=p->state[teacher].bestScore>-1e10f
+                ? meme.persistent->policy[teacher].bestWeights[at]:policy.weights[at];
+            const unsigned seed=blockHash(tile*MemeWeights+at+7919)^static_cast<unsigned>(p->counters.scoredFrames);
+            const float variation=config.mutation*(2*static_cast<float>(blockHash(seed)&0xffffu)/65535-1);
+            policy.weights[at]=fminf(1.5f,fmaxf(-1.5f,.9f*base+variation));
+            policy.first[at]=policy.second[at]=meme.actions[tile].gradient[at]=0;
+        }
+        if(tid==0) {policy.optimizerSteps=0;meme.actions[tile].batch=meme.actions[tile].active=0;}
     }
     if(tid==0) {
         state.optimizerSteps=0;
@@ -334,6 +359,7 @@ __global__ void resetWindows(BlockPersistent* p,Runtime* runtime) {
 }
 }
 struct VabpnnBlockModel {
+    VabpnnMemeModel* memes=nullptr;
     vabpnn::BlockPersistent* persistent=nullptr;
     vabpnn::BlockControl* controls=nullptr;
     Pending* pending=nullptr;
@@ -375,6 +401,7 @@ VabpnnBlockModel* vabpnnCreateBlockModel(cudaStream_t stream) {
         allocate(model->ids,vabpnn::BlockCount,model,"allocate block IDs");
         allocate(model->sortedIds,vabpnn::BlockCount,model,"allocate sorted block IDs");
         allocate(model->punish,vabpnn::BlockCount,model,"allocate penalty candidates");
+        model->memes=vabpnnCreateMemeModel(stream);model->bytes+=vabpnnMemeModelBytes(model->memes);
         initialize<<<(vabpnn::BlockCount+255)/256,256,0,stream>>>(model->persistent,model->controls);
         check(cudaEventCreateWithFlags(&model->initialized,cudaEventDisableTiming),"create block model event");
         check(cudaEventRecord(model->initialized,stream),"record block model event");
@@ -387,10 +414,12 @@ void vabpnnDestroyBlockModel(VabpnnBlockModel* model) noexcept {
     if(model->initialized) cudaEventSynchronize(model->initialized);
     void* allocations[]={model->persistent,model->controls,model->pending,model->messages[0],model->messages[1],
         model->runtime,model->keys,model->sortedKeys,model->ids,model->sortedIds,model->punish};
+    vabpnnDestroyMemeModel(model->memes);
     for(void* allocation:allocations) if(allocation) cudaFree(allocation);
     if(model->initialized) cudaEventDestroy(model->initialized);
     delete model;
 }
+VabpnnMemeModel* vabpnnBlockMemeModel(const VabpnnBlockModel* model) {return model ? model->memes:nullptr;}
 std::uint64_t vabpnnBlockModelBytes(const VabpnnBlockModel* model) noexcept { return model ? model->bytes:0; }
 vabpnn::DeviceBlockView vabpnnBlockModelView(const VabpnnBlockModel* model) {
     if(!model) throw std::invalid_argument("Block model missing");
@@ -414,36 +443,38 @@ void vabpnnPrepareBlockControllers(const VabpnnGpuFrame& frame) {
     auto* model=vabpnnSpikeBlockModel(frame.spikeModel); ready(model,frame.stream);
     const bool generated=model->hostControls++%vabpnn::BlockControlEvery==0 || model->forceControl;
     model->forceControl=false;
+    vabpnnPrepareMemes(frame,generated);
     if(generated) {
         const auto spike=vabpnnSpikeModelView(frame.spikeModel);
         const auto* decision=frame.decisionModel ? vabpnnDecisionModelView(frame.decisionModel).output:nullptr;
         const auto* demo=frame.onlineModel ? vabpnnOnlineDemoSample(frame.onlineModel):nullptr;
         const int next=1-model->current;
         prepare<<<vabpnn::BlockCount,256,0,frame.stream>>>(frame,model->persistent,model->pending,model->controls,
-            model->messages[model->current],model->messages[next],spike.membrane,spike.spikes,&spike.config->threshold,demo,decision);
+            model->messages[model->current],model->messages[next],spike.membrane,spike.spikes,&spike.config->threshold,demo,decision,vabpnnMemeModelView(model->memes));
         model->current=next;
     }
     stamp<<<1,1,0,frame.stream>>>(model->persistent,model->runtime,frame.frameId,generated);
     check(cudaGetLastError(),"prepare contextual block controls before pixel learning");
 }
 void vabpnnLearnBlockControllers(const VabpnnGpuFrame& frame,const int* valid,const std::uint32_t* label) {
-    if(!frame.spikeModel || !frame.neuronModel || !frame.decisionModel) return;
+    if(frame.evaluationMode || !frame.spikeModel || !frame.neuronModel || !frame.decisionModel) return;
     auto* model=vabpnnSpikeBlockModel(frame.spikeModel); ready(model,frame.stream);
     const auto decision=vabpnnDecisionModelView(frame.decisionModel);
     beginFeedback<<<1,1,0,frame.stream>>>(model->persistent,model->runtime,decision.output,valid);
     learn<<<vabpnn::BlockCount,32,0,frame.stream>>>(model->persistent,model->pending,model->runtime,
         vabpnnNeuronModelView(frame.neuronModel).blockVotes,decision.output,decision.parameters,label,
-        vabpnnSpikeModelView(frame.spikeModel).championIds);
+        vabpnnSpikeModelView(frame.spikeModel).championIds,vabpnnMemeModelView(model->memes));
+    vabpnnLearnMemes(frame,valid,label);
     vabpnnRankBlockControllers(model,frame.stream);
     check(cudaGetLastError(),"learn cached block actions from previous true-label feedback");
 }
 void vabpnnRankBlockControllers(VabpnnBlockModel* model,cudaStream_t stream) {
     ready(model,stream);
     beginRank<<<1,1,0,stream>>>(model->persistent,model->runtime);
-    rankKeys<<<(vabpnn::BlockCount+255)/256,256,0,stream>>>(model->persistent,model->runtime,model->keys,model->ids,model->punish);
+    rankKeys<<<(vabpnn::BlockCount+255)/256,256,0,stream>>>(model->persistent,model->runtime,model->keys,model->ids,model->punish,vabpnnMemeModelView(model->memes));
     sortPopulation<<<1,256,0,stream>>>(model->runtime,model->keys,model->ids,model->sortedKeys,model->sortedIds);
     markRank<<<(vabpnn::BlockCount+255)/256,256,0,stream>>>(model->persistent,model->runtime,model->sortedKeys,model->sortedIds,model->punish);
-    evolve<<<vabpnn::BlockCount,32,0,stream>>>(model->persistent,model->pending,model->runtime,model->punish);
+    evolve<<<vabpnn::BlockCount,32,0,stream>>>(model->persistent,model->pending,model->runtime,model->punish,vabpnnMemeModelView(model->memes));
     clearRankWindows<<<(vabpnn::BlockCount+255)/256,256,0,stream>>>(model->persistent,model->runtime);
     check(cudaGetLastError(),"controlled bottom-fifth policy mutation");
 }
@@ -455,6 +486,7 @@ void vabpnnResetBlockHistory(VabpnnBlockModel* model,cudaStream_t stream) {
     check(cudaMemsetAsync(model->runtime,0,sizeof(Runtime),stream),"clear block frame credit");
     resetWindows<<<(vabpnn::BlockCount+255)/256,256,0,stream>>>(model->persistent,model->runtime);
     neutral<<<(vabpnn::BlockCount+255)/256,256,0,stream>>>(model->controls);
+    vabpnnResetMemeHistory(model->memes,stream);
     model->current=0; model->hostControls=model->hostFeedbacks=0; model->forceControl=true;
     check(cudaGetLastError(),"reset transient block history while preserving learned policies");
 }
@@ -464,6 +496,7 @@ void vabpnnResumeBlockModel(VabpnnBlockModel* model,cudaStream_t stream) {
     check(cudaMemcpy(&model->hostConfig,&model->persistent->config,sizeof(model->hostConfig),cudaMemcpyDeviceToHost),"restore block scheduler configuration");
     if(!validConfig(model->hostConfig)) throw std::runtime_error("Invalid saved block controller configuration");
     vabpnnResetBlockHistory(model,stream);
+    vabpnnResumeMemeModel(model->memes,stream);
 }
 vabpnn::ModelPart vabpnnBlockCheckpointPart(VabpnnBlockModel* model) {
     return {model->persistent,sizeof(vabpnn::BlockPersistent)};

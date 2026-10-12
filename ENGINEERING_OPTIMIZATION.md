@@ -1,4 +1,55 @@
-# VABPnn 工程检查与优化（0.9.5）
+# VABPnn 1.0.2 性能改进
+
+日期：2026-10-11。基线为已部署 1.0.1，目标为 1.0.2。优先优化 Nsight Systems 中实际占时的 CUDA 核函数，保持连续显存、训练/评估、输入、模型和检查点兼容。
+
+## 改动与效果
+
+- NeuronModel.cu：读取脉冲后，用 warp 投票识别整组静默；静默 lane 不读 RGB/三值权重，完整静默 warp 直接写中性位编码和零分块总票。所有 lane 仍参与必要的块归约，密集、混合、负脉冲和中心采样规则不变。
+- SpikeConnections.cu：把 `selectedMask & label` 作为统一命中许可；非命中动作跳过五次 64-bit warp champion shuffle，仍计算原 CE 改善、EMA 和综合贡献。正向命中、平局像素排序与统计保持逐字节一致。
+- MemeState.cu：每个 warp 协作遍历一条真实 CSR 行，八个 warp 循环覆盖全部 256 行；长行边读合并，本地 prototype 权重每块计算一次。所有边、来源去重、四邻排除、无效 ID、包资格、竞争和 top-2 规则保留。
+- 发布与存档：版本 1.0.2，保存到 `release-1.0.2.bin`，先只读恢复 1.0.1/1.0.0，再使用原旧版迁移链；v6 布局保持一致。
+
+相同五档 Nsight Systems 分析的核平均：投票 0.3609 → 0.2939 ms，贡献/冠军 0.3302 → 0.2876 ms，模因 CSR 选路 1.5593 → 0.4632 ms。分析器会增加开销；最终整帧对比取未附加分析器的两轮基准。
+
+## 独立 CUDA 基准
+
+RTX 5070 Laptop GPU；Release/O3；1920×1024；优化前后各两轮，每档 64 帧预热、512 帧测量。使用 1.0.1 的备份 executable 作基线，DLL 备份 SHA256 与已部署 1.0.1 完全一致。四轮分别为 baseline、after-1、before-2、after-2；没有用不同训练频率或空模因支路替代压力测量。
+
+| 档位 | 1.0.1 算子平均 ms | 1.0.2 算子平均 ms | 平均耗时下降 | 1.0.2 所测 CUDA 链最高 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 仅推理 | 1.8226 | 1.5250 | 16.3% | 3.4821 |
+| F8 冻结评估 | 1.8262 | 1.5395 | 15.7% | 3.0343 |
+| 默认人工示范 + JEPA | 4.0450 | 3.7175 | 8.1% | 7.4050 |
+| 每帧 JEPA + 满容量拓扑压力 | 4.5111 | 4.1798 | 7.3% | 7.9826 |
+| 成熟模因 + 排名/变异/每帧面板压力 | 4.6250 | 4.3493 | 6.0% | 8.3863 |
+
+优化后合计 5,120 个测量帧，所测 CUDA 链超过 10 ms 为 0，最高 8.3863 ms。成熟本地/进口模因各 7,680、长程实际边超过 80,000；压力档投影、actor、排名、变异计数非零，覆盖这些分支与像素/JEPA/拓扑/Scope 同帧更新。模型与 Scope 固定 624,397,031 字节，未新增逐帧分配或 CPU 图像回读。
+
+所测链包含显存 D2D、算子/训练/连接/传播/面板摘要与控制 D2H，排除游戏渲染、GL blit、CUDA map/unmap、初始化和模型文件保存。GPU 调度、其他程序和 Minecraft 渲染会影响游戏内耗时。
+
+## 正确性和旧模型
+
+13 组 CUDA 验证通过。performance_equivalence_test 用独立冻结的 1.0.1 参考核做逐字节比较，覆盖全静默/全活跃/混合正负/稀疏 warp、完整与奇数 pitched 输入、零/部分/全部命中、微小和一般 delta 分支、全部实际 CSR 行、重复来源、无效 ID、排序平局、过期与跳数和独立/协作/竞争模式。既有梯度、CPU AdamW、全网格票数、CSR/LIF、top-k 冲突、模因知识/传播、F8 权重/优化器/EMA/拓扑冻结与恢复均通过。
+
+Java 窗口和真实 GL/JNI（MSAA0/4）通过；JNI 将实际用户 1.0.1 模型复制到独立测试目录，只读恢复到 1.0.2 并比对训练计数与原文件 SHA256。真实 Minecraft 26.1 临时世界通过 start/stop、F7/F8/F9/F10、冷待命、15 路对象、Ctrl/Shift 和背包修饰点击、背包左右键示范、鼠标 Δx/Δy、30 Hz 坐标、两次保存和退出复位。
+
+真实 Minecraft 26.1 单独任务复测通过：GPU 算子日志峰值 **7.875 ms**、超过 10 ms 为 **0**，人物坐标采样约 **29.99 Hz**，F8 冻结推理与所有 15 路操作正常。此前一轮游戏日志曾记录峰值 43.409 ms、超预算累计 491；未将其作为性能达标结果，保留在 performance-minecraft-build.log。当前 GPU 空闲后单独执行复测，最终记录为 performance-minecraft-isolated-validation.log。以上数值是 GPU 算子阶段，不能代表整帧游戏渲染耗时。
+
+## 源码与产物
+
+原源码、1.0.1 DLL 和基准 executable 位于 Mod/build/performance-1.0.2-backup；旧 jar 和已有模型保留。生产 jar 不含自动测试模组和测试 class。
+
+正式 jar：[vabpnn-1.0.2.jar](C:/Users/43828/Desktop/MyProject/VABPnn/Mod/build/libs/vabpnn-1.0.2.jar)，SHA256 4D05B58591AE2B10FD64E95651D94CEEFE0A2D6A4C86615A4FD061C5F70475FF，1,531,496 字节；源码 jar SHA256 4840FA4C6AE26DF4AACD487CD88F3A5B8F4B1C550ED494C7532B65769F6E135C。生产 DLL SHA256 3BE2F4159C5DBD923F6A501798CBA1AB27BC291735EAF67CB15C09D18A068AEE。
+
+部署目标：[实例 mods 中的 1.0.2](D:/Minecraft/JavaEdition/BlockHelm/.minecraft/versions/26.1-fabric-0.19.3/mods/vabpnn-1.0.2.jar)。1.0.1 改为 .jar.disabled 保留，其余历史 jar 与六份已有模型逐文件校验。新保存仅写 release-1.0.2.bin，不安装测试模型。
+
+日志位于 Mod/build：performance-native-validation.log、performance-ui-gl-validation.log、performance-minecraft-build.log、performance-minecraft-isolated-validation.log、performance-baseline.log、performance-before-2.log、performance-after-1.log、performance-after-2.log，以及前后 Nsight Systems 的 log/nsys-rep/sqlite。发布清单位于 performance-deployment.json。
+
+复现数值：native/build-native.ps1 -TestOperator；基准 executable 参数 --meme-stress --block-stress；窗口/JNI：gradlew.bat --offline scopeUiSmokeTest glCaptureSmokeTest；真实 Minecraft：gradlew.bat --offline runClientGameTest。
+
+---
+
+# 历史：VABPnn 工程检查与优化（0.9.5）
 
 日期：2026-10-10。基线为 0.9.4，优化版为 0.9.5。本次检查 Java 输入/面板、JNI 显存池与 worker、CUDA 投票/SNN/时间决策/JEPA/在线学习和构建脚本。
 
@@ -61,3 +112,4 @@ RTX 5070 Laptop GPU；Release/O3；1920×1024；每档 64 帧预热、512 帧测
 复现：在 Mod 中执行 gradlew.bat build glCaptureSmokeTest scopeUiSmokeTest runClientGameTest --offline；原生数值验证与基准执行 powershell.exe -NoProfile -ExecutionPolicy Bypass -File native/build-native.ps1 -TestOperator -Benchmark。
 
 部署已完成：正式实例 mods 中启用 vabpnn-0.9.5.jar，0.9.4 保留为 .jar.disabled。部署后的 SHA-256 复核确认已有 online-v1.bin、online-v2.bin 和其他模组全部保持原内容。DLL 的 21 个导出符号也与 0.9.4 完全相同；接口核对日志为 optimization-exports-validation.log。
+

@@ -12,9 +12,9 @@ public final class ActionExecutor {
         default void cancelPending() {}
     }
     public static final long COMMAND_LEASE_NANOS = 500_000_000L;
-    private static final int[] KEY_ACTIONS = {0, 1, 2, 3, 4, 12};
-    private static final int[] KEY_CODES = {87, 65, 83, 68, 69, 32};
-    private static final int KEY_MASK = 0x101f;
+    private static final int[] KEY_ACTIONS = ActionLayout.KEY_ACTIONS;
+    private static final int[] KEY_CODES = ActionLayout.KEY_CODES;
+    private static final int KEY_MASK = ActionLayout.KEY_MASK;
     private long lastFrame, appliedFrame, appliedCommands;
     private int heldKeys, appliedMask;
     private boolean leftDown, rightDown;
@@ -39,7 +39,7 @@ public final class ActionExecutor {
         int mask = (int) command[2];
         long age = now - command[1];
         if (!active || command[3] != 1 || command[0] <= 0 || age < 0
-                || age > COMMAND_LEASE_NANOS || (mask & ~0x1fff) != 0 || conflicts(mask)) {
+                || age > COMMAND_LEASE_NANOS || (mask & ~ActionLayout.KNOWN_MASK) != 0 || conflicts(mask)) {
             stop(sink);
             return;
         }
@@ -54,12 +54,14 @@ public final class ActionExecutor {
         }
         sink.beginCommand();
         int desiredKeys = mask & KEY_MASK;
-        for (int i = 0; i < KEY_ACTIONS.length; i++) {
-            int keyBit = 1 << KEY_ACTIONS[i];
-            if ((heldKeys & keyBit) != (desiredKeys & keyBit)) {
-                boolean down = (desiredKeys & keyBit) != 0;
-                sink.key(KEY_CODES[i], down);
-                heldKeys = down ? heldKeys | keyBit : heldKeys & ~keyBit;
+        // Modifier releases/presses precede ordinary keys and mouse events in the same packet.
+        for (int pass=0;pass<2;pass++) for (int i=0;i<KEY_ACTIONS.length;i++) {
+            if ((KEY_ACTIONS[i]>=13)!=(pass==0)) continue;
+            int keyBit=1<<KEY_ACTIONS[i];
+            if ((heldKeys & keyBit)!=(desiredKeys & keyBit)) {
+                boolean down=(desiredKeys & keyBit)!=0;
+                sink.key(KEY_CODES[i],down);
+                heldKeys=down ? heldKeys | keyBit:heldKeys & ~keyBit;
                 if (!keepContext(sink)) return;
             }
         }
@@ -105,3 +107,4 @@ public final class ActionExecutor {
         // Keep lastFrame: resuming cannot replay a previously consumed command.
     }
 }
+

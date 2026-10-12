@@ -1,6 +1,9 @@
 # Gradle / IDE build files
 .gradle/
 build/
+# Native build scripts are source files; keep generated output under /build.
+!/native/build/
+!/native/build/*.ps1
 out/
 .idea/
 *.iml

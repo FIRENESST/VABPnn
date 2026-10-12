@@ -235,6 +235,8 @@ __global__ void finishFrame(JepaWorkspace* work, JepaState* state, JepaOutput* o
     const float rx = tanhf(work->motionRaw[0]) * config->maxMouseUnitsPerSecond;
     const float ry = tanhf(work->motionRaw[1]) * config->maxMouseUnitsPerSecond;
     out->valid = out->valid && isfinite(rx) && isfinite(ry) && isfinite(out->jepaLoss);
+    out->headRateX=out->valid && out->pairReady ? rx:0;
+    out->headRateY=out->valid && out->pairReady ? ry:0;
     out->motionActive = out->valid && out->pairReady && config->motionEnabled;
     out->rateX = out->motionActive ? rx : 0; out->rateY = out->motionActive ? ry : 0;
     const float dt = fminf(out->deltaSeconds, config->maxMotionDtSeconds);

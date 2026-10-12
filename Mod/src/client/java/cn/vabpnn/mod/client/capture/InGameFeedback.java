@@ -18,7 +18,7 @@ final class InGameFeedback {
     private static boolean wasModel,idleNotice;
     private static long idleNoticeAfter;
     private static final String[] ACTIONS={"W","A","S","D","E","x","y","left_down","right_down",
-            "left_up","right_up","wheel","space"};
+            "left_up","right_up","wheel","space","ctrl","shift"};
     private InGameFeedback() {}
 
     static void initialize() {
@@ -37,7 +37,13 @@ final class InGameFeedback {
                         .then(ClientCommands.literal("help").executes(context -> help(context.getSource())))
                         .then(ClientCommands.literal("start").executes(context -> {
                             post(text(CaptureController.startPipeline()),false); return 1;
-                        }))
+                        }).then(ClientCommands.literal("predict").executes(context -> {
+                            post(text(CaptureController.startPipeline(true)),false);return 1;
+                        })))
+                        .then(ClientCommands.literal("predict")
+                                .executes(context -> predict(true))
+                                .then(ClientCommands.literal("on").executes(context -> predict(true)))
+                                .then(ClientCommands.literal("off").executes(context -> predict(false))))
                         .then(ClientCommands.literal("stop").executes(context -> {
                             post(text(CaptureController.stopPipeline() ? "stopped":"already_stopped"),false);
                             return 1;
@@ -52,6 +58,14 @@ final class InGameFeedback {
                                 .then(ClientCommands.literal("independent").executes(context -> setBlocks(-1,0)))
                                 .then(ClientCommands.literal("cooperate").executes(context -> setBlocks(-1,1)))
                                 .then(ClientCommands.literal("compete").executes(context -> setBlocks(-1,2))))
+                        .then(ClientCommands.literal("memes")
+                                .executes(context -> memeStatus(context.getSource()))
+                                .then(ClientCommands.literal("on").executes(context -> setMemes(1)))
+                                .then(ClientCommands.literal("off").executes(context -> setMemes(0)))
+                                .then(ClientCommands.literal("window")
+                                        .executes(context -> setMemeWindow(!CaptureController.memeWindowVisible()))
+                                        .then(ClientCommands.literal("on").executes(context -> setMemeWindow(true)))
+                                        .then(ClientCommands.literal("off").executes(context -> setMemeWindow(false)))))
                         .then(ClientCommands.literal("hud")
                                 .then(ClientCommands.literal("on").executes(context -> setHud(true)))
                                 .then(ClientCommands.literal("off").executes(context -> setHud(false))))));
@@ -90,6 +104,9 @@ final class InGameFeedback {
         if(detail.length()>160) detail=detail.substring(0,160)+"…";
         post(text("pipeline_failed",detail),true);
     }
+    private static int predict(boolean enabled) {
+        post(text(CaptureController.setPredictionOnly(enabled)),false);return 1;
+    }
     private static int setBlocks(int enabled,int mode) {
         CaptureController.configureBlocks(enabled,mode);
         String message=enabled==0 ? "高层控制关闭请求已排队":enabled==1 ? "高层控制开启请求已排队":
@@ -105,6 +122,25 @@ final class InGameFeedback {
                 s.rankings(),s.mutations(),s.punished())),false));
         return 1;
     }
+    private static int setMemes(int enabled) {
+        CaptureController.configureMemes(enabled);
+        post(Component.literal("模因"+(enabled==1 ? "开启":"关闭")+"请求已排队；/vabpnn memes 查看完成帧状态"),false);
+        return 1;
+    }
+    private static int setMemeWindow(boolean show) {
+        if(!CaptureController.showMemeWindow(show)) { post(text("not_started"),false);return 0; }
+        post(text(show ? "meme_scope_on":"meme_scope_off"),false);return 1;
+    }
+    private static int memeStatus(FabricClientCommandSource source) {
+        var s=CaptureController.memeState();
+        source.sendFeedback(labelled(Component.literal(String.format(Locale.ROOT,
+            "模因 %s，完成帧 %d；本地活跃 %d / 进口活跃 %d，真实示范 %d，投影更新 %d；转发接收 %d，长程选路 %d",
+            s.enabled() ? "开启":"关闭",s.frame(),s.localActive(),s.importActive(),s.samples(),s.updates(),
+            s.receipts(),s.longSelections())),false));
+        source.sendFeedback(labelled(Component.literal("模因传播窗口 "+(CaptureController.memeWindowVisible() ? "显示":"隐藏")
+                +" / 5 Hz；采样帧 "+CaptureController.memeWindowFrame()+"；F6 或 /vabpnn memes window [on|off]"),false));
+        return 1;
+    }
     private static int setHud(boolean enabled) {
         hudEnabled=enabled; nextHud=0;
         post(text(enabled ? "hud_on":"hud_off"),false);
@@ -113,7 +149,7 @@ final class InGameFeedback {
     private static int help(FabricClientCommandSource source) {
         source.sendFeedback(labelled(text("help",hotkeys()),false));
         source.sendFeedback(labelled(text("commands"),false));
-        source.sendFeedback(labelled(Component.literal("/vabpnn blocks [on|off|independent|cooperate|compete]"),false));
+        source.sendFeedback(labelled(Component.literal("/vabpnn blocks [on|off|independent|cooperate|compete]；/vabpnn memes [on|off]；/vabpnn memes window [on|off]"),false));
         return 1;
     }
     private static Component hotkeys() {
@@ -122,10 +158,14 @@ final class InGameFeedback {
     private static int status(FabricClientCommandSource source) {
         var state=CaptureController.feedbackState(true);
         var input=state.input();
-        source.sendFeedback(labelled(text("status.mode",mode(input.modelControl()),state.gate(),
+        source.sendFeedback(labelled(text("status.mode",mode(input),state.gate(),
                 text(state.scopeVisible() ? "shown":"hidden")),false));
         source.sendFeedback(labelled(text("status.actions",input.frame(),
                 names(input.selectedMask(),true),held(source.getClient(),input)),false));
+        var prediction=state.prediction();
+        source.sendFeedback(labelled(text("status.prediction",prediction.frame(),names(prediction.selectedMask(),true),
+                String.format(Locale.ROOT,"%+.3f",prediction.dx()),String.format(Locale.ROOT,"%+.3f",prediction.dy()),
+                String.format(Locale.ROOT,"%+.3f",prediction.wheel())),false));
         source.sendFeedback(labelled(text("status.decision",state.decisionFrame(),state.requestedK(),
                 names(state.eligibleMask(),true),state.selectedCount(),names(state.lastHumanLabel(),true)),false));
         var position=CaptureController.positionState();
@@ -133,6 +173,9 @@ final class InGameFeedback {
                 String.format(Locale.ROOT,"%.3f",position.x()),String.format(Locale.ROOT,"%.3f",position.y()),
                 String.format(Locale.ROOT,"%.3f",position.z()),
                 text(position.valid() ? "position.connected":"position.unavailable"),position.positionSteps()),false));
+        var time=CaptureController.temporalState();
+        source.sendFeedback(labelled(text("status.time",String.format(Locale.ROOT,"%.2f",time.seconds()),
+                String.format(Locale.ROOT,"%.3f",time.minutes()),time.minuteBuckets(),time.minuteSteps(),time.bayesianMotionSteps()),false));
         var human=state.human();
         source.sendFeedback(labelled(text("status.mouse",human.leftPress(),human.rightPress(),
                 human.leftRelease(),human.rightRelease()),false));
@@ -141,6 +184,7 @@ final class InGameFeedback {
         source.sendFeedback(labelled(text("status.learning",state.examples(),state.pixelSteps(),
                 state.decisionSteps(),state.jepaSteps(),state.motionSteps(),checkpoint(state)),false));
         blockStatus(source);
+        memeStatus(source);
         return 1;
     }
     private static Component checkpoint(CaptureController.FeedbackState state) {
@@ -154,15 +198,16 @@ final class InGameFeedback {
             default -> "starting";
         });
     }
-    private static Component mode(boolean model) {
-        return text(!CaptureController.isStarted() ? "mode.standby":model ? "mode.model":"mode.demo");
+    private static Component mode(CaptureController.InputState input) {
+        return text(!CaptureController.isStarted() ? "mode.standby":input.predictionOnly() ? "mode.predict":
+                input.modelControl() ? "mode.model":"mode.demo");
     }
     private static String millis(long micros) { return micros<=0 ? "--":String.format(Locale.ROOT,"%.2f",micros/1000.0); }
     private static Component names(int mask,boolean allActions) {
         var output=Component.empty();
         boolean first=true;
-        for(int k=0;k<13;k++) {
-            if((mask&(1<<k))==0 || (!allActions && k>4 && k!=12)) continue;
+        for(int k=0;k<ActionLayout.ACTIONS;k++) {
+            if((mask&(1<<k))==0 || (!allActions && (ActionLayout.KEY_MASK & (1<<k))==0)) continue;
             if(!first) output.append(" + ");
             output.append(k<5 ? Component.literal(ACTIONS[k]):text("action."+ACTIONS[k]));
             first=false;
@@ -227,7 +272,14 @@ final class InGameFeedback {
         if(!hudEnabled || now<flashUntil || (client.screen!=null
                 && !(client.screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen<?>))
                 || client.getOverlay()!=null) return;
-        client.gui.setOverlayMessage(labelled(text("hud",mode(state.input().modelControl()),state.gate(),
+        if(state.input().predictionOnly()) {
+            var predicted=state.prediction();
+            client.gui.setOverlayMessage(labelled(text("hud.predict",state.gate(),names(predicted.selectedMask(),true),
+                    String.format(Locale.ROOT,"%+.2f",predicted.dx()),String.format(Locale.ROOT,"%+.2f",predicted.dy()),
+                    millis(state.gpuUs())),false),false);
+        } else client.gui.setOverlayMessage(labelled(text("hud",mode(state.input()),state.gate(),
                 held(client,state.input()),millis(state.gpuUs())),false),false);
     }
 }
+
+

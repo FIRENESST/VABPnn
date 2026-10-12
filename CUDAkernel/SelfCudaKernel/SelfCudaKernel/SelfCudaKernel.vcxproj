@@ -159,6 +159,7 @@
   <ItemGroup></ItemGroup>
   <ItemGroup>
     <ClInclude Include="GpuFrame.h" />
+    <ClInclude Include="ActionContracts.h" />
     <ClInclude Include="FrameOperator.h" />
   </ItemGroup>
   <ItemGroup>
@@ -167,6 +168,8 @@
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="TemporalDecision.cu" />
+    <CudaCompile Include="MinuteTimeline.cu" />
+    <ClInclude Include="MinuteTimeline.h" />
     <ClInclude Include="TemporalDecision.h" />
   </ItemGroup>
   <ItemGroup>
@@ -185,6 +188,8 @@
   <ItemGroup>
     <CudaCompile Include="BlockControllers.cu" />
     <ClInclude Include="BlockControllers.h" />
+    <CudaCompile Include="MemeState.cu" />
+    <ClInclude Include="MemeState.h" />
     <CudaCompile Include="NetworkScope.cu"></CudaCompile>
     <ClInclude Include="NetworkScope.h"></ClInclude>
   </ItemGroup>

@@ -34,7 +34,7 @@ public final class MouseMotionTracker {
         long age=now-command[1];
         if(age<0 || age>ActionExecutor.COMMAND_LEASE_NANOS) return;
         int mask=(int)command[2];
-        if((mask & ~0x1fff)!=0) return;
+        if((mask & ~0x7fff)!=0) return;
         float dx=Float.intBitsToFloat((int)command[4]),dy=Float.intBitsToFloat((int)command[5]);
         if(!Float.isFinite(dx) || !Float.isFinite(dy)) return;
         lastPredictionFrame=command[0];
@@ -64,3 +64,4 @@ public final class MouseMotionTracker {
         return published;
     }
 }
+

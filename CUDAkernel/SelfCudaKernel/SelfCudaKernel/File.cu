@@ -1,6 +1,7 @@
 #include "FrameOperator.h"
 #include "OnlineLearning.h"
 #include "SpikeConnections.h"
+#include "MemeState.h"
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -54,6 +55,7 @@ void vabpnnLaunchNextStage(const VabpnnGpuFrame& frame) {
     if(frame.spikeModel) vabpnnLaunchSpikeForward(frame);
     vabpnnLaunchTernaryVotes(frame, frame.neuronModel);
     if(frame.spikeModel) vabpnnRecordSpikeVotes(frame.spikeModel,frame.stream);
+    vabpnnObserveMemes(frame);
     const auto votes = vabpnnNeuronModelView(frame.neuronModel);
     if (!frame.decisionModel) return;
     vabpnnClearMotionProposal(frame.decisionModel, frame.stream);
@@ -63,6 +65,7 @@ void vabpnnLaunchNextStage(const VabpnnGpuFrame& frame) {
     // WHEEL EXTENSION POINT: queue a later GPU wheel operator here. JEPA writes X/Y only.
     // Mouse movement is enabled only after head training, then gated by actions 6 and 7.
     vabpnnLaunchTemporalDecision(frame, votes.output, frame.decisionModel);
+    vabpnnObserveSpikePrediction(frame); // Structural learning also runs with frozen neural weights.
     // GPU probabilities/history remain here. The mod receives only the final 40-byte command.
 }
 
@@ -72,6 +75,7 @@ void vabpnnLaunchNextStage(const VabpnnGpuFrame& frame) {
 // TemporalDecision parameters are float32; update via vabpnnMutableDecisionParameters(...).
 // Pixel/decision labels and rules remain external. JEPA already has GPU AdamW self-supervision.
 void vabpnnLaunchLearningStep(const VabpnnGpuFrame& frame) {
+    if (frame.evaluationMode) return; // Includes JEPA AdamW/EMA and observation training caches.
     if (frame.jepaModel && frame.neuronModel)
         vabpnnTrainJepaSelfSupervised(frame.jepaModel, frame.stream);
     if (frame.onlineModel) vabpnnCacheDemoObservation(frame);
@@ -147,4 +151,3 @@ int main() {
     return exitCode;
 }
 #endif
-

@@ -10,6 +10,7 @@ struct VabpnnOnlineModel;
 struct VabpnnSpikeModel;
 
 namespace vabpnn {
+struct MemeRelayTrace;
 // Same monotonic clock as captureNanos; zero timestamp means no current local player.
 struct PlayerPositionSample {
     std::uint64_t sampleNanos = 0, epoch = 0;
@@ -34,6 +35,9 @@ struct VabpnnGpuFrame {
     VabpnnOnlineModel* onlineModel = nullptr; // Cached human demonstrations and online training.
     VabpnnSpikeModel* spikeModel = nullptr; // CSR connections, membrane and signed spikes.
     vabpnn::PlayerPositionSample position{}; // Causal 30 Hz sidecar-style observation.
+    bool evaluationMode = false; // Freeze neural weights/optimizers; salience and CSR plasticity remain dynamic.
+    // Optional observation state, separate from learning and checkpoints.
+    vabpnn::MemeRelayTrace* memeTrace = nullptr;
 };
 
 // Replace this consumer with your operator. Queue work on frame.stream without host waits.

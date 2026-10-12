@@ -13,12 +13,12 @@ import org.lwjgl.glfw.GLFW;
 
 /** Minecraft 26.1 callbacks, logical key state and cursor position share the client thread. */
 final class MinecraftInputSink implements ActionExecutor.Sink {
-    private static final int[] KEY_CODES = {87,65,83,68,69,32};
-    private static final int[] KEY_ACTIONS = {0,1,2,3,4,12};
+    private static final int[] KEY_CODES = ActionLayout.KEY_CODES;
+    private static final int[] KEY_ACTIONS = ActionLayout.KEY_ACTIONS;
     private final Minecraft client;
     private Object commandLevel, commandScreen;
     private boolean commandGrabbed;
-    private int touchedKeys, touchedButtons;
+    private int touchedKeys, touchedButtons, modelModifiers;
     MinecraftInputSink(Minecraft client) { this.client = client; }
 
     @Override public void beginCommand() {
@@ -35,10 +35,25 @@ final class MinecraftInputSink implements ActionExecutor.Sink {
     private boolean physicalButton(int button) {
         return GLFW.glfwGetMouseButton(client.getWindow().handle(),button) == GLFW.GLFW_PRESS;
     }
+    private int modifiers() {
+        int value=modelModifiers;
+        if (physicalKey(GLFW.GLFW_KEY_LEFT_CONTROL) || physicalKey(GLFW.GLFW_KEY_RIGHT_CONTROL)) value|=GLFW.GLFW_MOD_CONTROL;
+        if (physicalKey(GLFW.GLFW_KEY_LEFT_SHIFT) || physicalKey(GLFW.GLFW_KEY_RIGHT_SHIFT)) value|=GLFW.GLFW_MOD_SHIFT;
+        if (physicalKey(GLFW.GLFW_KEY_LEFT_ALT) || physicalKey(GLFW.GLFW_KEY_RIGHT_ALT)) value|=GLFW.GLFW_MOD_ALT;
+        if (physicalKey(GLFW.GLFW_KEY_LEFT_SUPER) || physicalKey(GLFW.GLFW_KEY_RIGHT_SUPER)) value|=GLFW.GLFW_MOD_SUPER;
+        return value;
+    }
     @Override public void key(int code, boolean down) {
-        if (!down && physicalKey(code)) return;
+        if (!down && physicalKey(code)) {
+            if(code==GLFW.GLFW_KEY_LEFT_CONTROL) modelModifiers &= ~GLFW.GLFW_MOD_CONTROL;
+            if(code==GLFW.GLFW_KEY_LEFT_SHIFT) modelModifiers &= ~GLFW.GLFW_MOD_SHIFT;
+            return;
+        }
         if (down) for (int i=0;i<KEY_CODES.length;i++) if(KEY_CODES[i]==code) touchedKeys |= 1<<i;
-        var event = new KeyEvent(code,GLFW.glfwGetKeyScancode(code),0);
+        int modifier=code==GLFW.GLFW_KEY_LEFT_CONTROL ? GLFW.GLFW_MOD_CONTROL:
+                code==GLFW.GLFW_KEY_LEFT_SHIFT ? GLFW.GLFW_MOD_SHIFT:0;
+        modelModifiers=down ? modelModifiers | modifier:modelModifiers & ~modifier;
+        var event = new KeyEvent(code,GLFW.glfwGetKeyScancode(code),modifiers());
         CaptureController.beginSynthetic();
         try {
             ((KeyboardHandlerInvoker) client.keyboardHandler).vabpnn$pressKey(client.getWindow().handle(),
@@ -54,7 +69,7 @@ final class MinecraftInputSink implements ActionExecutor.Sink {
         CaptureController.beginSynthetic();
         try {
             MouseHandlerAccess mouse = (MouseHandlerAccess) client.mouseHandler;
-            mouse.vabpnn$button(client.getWindow().handle(),new MouseButtonInfo(button,0),
+            mouse.vabpnn$button(client.getWindow().handle(),new MouseButtonInfo(button,modifiers()),
                     down ? GLFW.GLFW_PRESS : GLFW.GLFW_RELEASE);
             // Container callbacks can return early, so release the world state as well.
             if (!down || client.screen==null && client.getOverlay()==null)
@@ -103,6 +118,7 @@ final class MinecraftInputSink implements ActionExecutor.Sink {
         if ((buttons&2)!=0) { forceMapping(InputConstants.Type.MOUSE,1,true,false); mouse.vabpnn$setRightPressed(true); }
     }
     @Override public void cancelPending() {
+        modelModifiers=0;
         if (touchedKeys==0 && touchedButtons==0) return;
         for(int i=0;i<KEY_CODES.length;i++)
             if ((touchedKeys & (1<<i))!=0 && !physicalKey(KEY_CODES[i]))
@@ -129,3 +145,4 @@ final class MinecraftInputSink implements ActionExecutor.Sink {
         }
     }
 }
+

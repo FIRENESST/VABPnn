@@ -43,6 +43,7 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
             context.runOnClient(client -> {
                 sink=new MinecraftInputSink(client);
                 client.options.sensitivity().set(.5);
+                client.options.framerateLimit().set(60); // Stable test load; production FPS settings are untouched.
                 client.options.smoothCamera=false;
                 client.options.invertMouseX().set(false);
                 client.options.invertMouseY().set(false);
@@ -58,7 +59,28 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
             context.waitFor(client -> CaptureController.inputState().allowed()
                     && CaptureController.inputState().frame()>0
                     && CaptureController.inputState().appliedCommands()>0,600);
-            MinecraftFeedbackChecks.verifyEmptyModel(context);
+            MinecraftFeedbackChecks.verifyContinuousModel(context);
+            hotkey(context,GLFW.GLFW_KEY_F6);
+            context.waitFor(client -> CaptureController.memeWindowVisible() && CaptureController.memeWindowFrame()>0,200);
+            var frozen=context.computeOnClient(client -> CaptureController.feedbackState(true));
+            long coordinateUpdates=context.computeOnClient(client -> CaptureController.positionState().positionSteps());
+            var frozenTime=context.computeOnClient(client -> CaptureController.temporalState());
+            context.waitTicks(24);
+            context.runOnClient(client -> {
+                var evaluated=CaptureController.feedbackState(true);
+                require(evaluated.input().modelControl() && evaluated.processed()>frozen.processed(),
+                        "F8 evaluation continues real GPU inference");
+                require(evaluated.examples()==frozen.examples() && evaluated.pixelSteps()==frozen.pixelSteps()
+                        && evaluated.decisionSteps()==frozen.decisionSteps() && evaluated.jepaSteps()==frozen.jepaSteps()
+                        && evaluated.motionSteps()==frozen.motionSteps()
+                        && CaptureController.positionState().positionSteps()==coordinateUpdates
+                        && CaptureController.temporalState().minuteSteps()==frozenTime.minuteSteps()
+                        && CaptureController.temporalState().bayesianMotionSteps()==frozenTime.bayesianMotionSteps(),
+                        "F8 evaluation freezes all published training counters including JEPA and coordinates");
+            });
+            hotkey(context,GLFW.GLFW_KEY_F6);
+            VabpnnMod.LOGGER.info("PASS: F8 frozen evaluation continues actual GPU/model operation without training, including the independent meme viewer.");
+            MinecraftFeedbackChecks.verifyPredictionOnly(context);
             // Feed deterministic nonempty packets through the SAME production controller as JNI.
             context.runOnClient(client -> {
                 long id=CaptureController.inputState().frame()+1,now=System.nanoTime();
@@ -77,16 +99,24 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
                 CaptureController.applyModelCommand(new long[]{id++,now,1<<10,1,0,0,0},now);
                 require(!client.mouseHandler.isRightPressed() && !client.options.keyUse.isDown(),
                         "F8 production path injects right release");
+                int modifiers=(1<<13)|(1<<14);
+                CaptureController.applyModelCommand(new long[]{id++,now,modifiers,1,0,0,0},now);
+                require(client.options.keySprint.isDown() && client.options.keyShift.isDown()
+                        && CaptureController.inputState().selectedMask()==modifiers,
+                        "F8 production path injects Ctrl and Shift");
             });
             hotkey(context,GLFW.GLFW_KEY_F9);
             context.runOnClient(client -> {
                 var state=CaptureController.inputState();
                 require(!state.allowed() && state.frame()==0 && state.heldKeys()==0 && state.heldButtons()==0,
                         "F9 releases actual production control immediately");
+                require(!client.options.keySprint.isDown() && !client.options.keyShift.isDown(),
+                        "F9 releases production Ctrl and Shift");
             });
             hotkey(context,GLFW.GLFW_KEY_F8); // back to demonstration before deterministic fixtures
             hotkey(context,GLFW.GLFW_KEY_F9);
             verifyInventoryDemonstrations(context);
+            verifyModifiers(context);
             for(int k=0;k<4;k++) {
                 double x=context.computeOnClient(client -> client.player.getX());
                 double z=context.computeOnClient(client -> client.player.getZ());
@@ -223,7 +253,7 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
             hotkey(context,GLFW.GLFW_KEY_F8);
             context.runOnClient(client -> require(!CaptureController.inputState().modelControl()
                     && CaptureController.inputState().frame()==0,"F8 returns control to the player"));
-            VabpnnMod.LOGGER.info("PASS: live GPU commands applied in a real world; all 13 objects, player movement/jump, inventory, camera, attack/release, hotbar, GUI click position, held-input recovery and F8/F9 releases.");
+            VabpnnMod.LOGGER.info("PASS: live GPU commands applied in a real world; all 15 objects, player movement/jump, inventory, camera, attack/release, hotbar, GUI click position, held-input recovery and F8/F9 releases.");
             MinecraftFeedbackChecks.verifyStopRestart(context);
         } finally {
             if(sink!=null) context.runOnClient(client -> executor.stop(sink));
@@ -290,6 +320,38 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
         context.waitTick();
         cn.vabpnn.mod.VabpnnMod.LOGGER.info("PASS: real inventory-consumed left/right callbacks, holds and releases are recorded; both press labels reach online GPU learning without inventory chat notifications.");
     }
+    private void verifyModifiers(ClientGameTestContext context) {
+        send(context,1|(1<<13),0,0,0);
+        context.runOnClient(client -> require(client.options.keyUp.isDown() && client.options.keySprint.isDown(),
+                "Ctrl+W reaches actual sprint mappings"));
+        context.waitFor(client -> client.player.isSprinting(),40);
+        send(context,0,0,0,0);
+        context.runOnClient(client -> require(!client.options.keySprint.isDown(),"Ctrl omission releases sprint"));
+        send(context,1<<14,0,0,0);
+        context.runOnClient(client -> require(client.options.keyShift.isDown(),"Shift reaches actual sneak mapping"));
+        context.waitFor(client -> client.player.isShiftKeyDown(),40);
+        send(context,(1<<13)|(1<<14),0,0,0);
+        context.runOnClient(client -> require(client.options.keySprint.isDown() && client.options.keyShift.isDown(),
+                "Ctrl/Shift have no added policy conflict"));
+        context.runOnClient(client -> executor.stop(sink));
+        context.runOnClient(client -> require(!client.options.keySprint.isDown() && !client.options.keyShift.isDown(),
+                "stop releases both actual modifier mappings"));
+        context.runOnClient(client -> client.setScreen(new ProbeInventory(client.player)));
+        context.waitTick();
+        send(context,(1<<14)|(1<<7)|(1<<9),0,0,0);
+        context.runOnClient(client -> require((((ProbeInventory)client.screen).clickModifiers & GLFW.GLFW_MOD_SHIFT)!=0,
+                "inventory Shift-click carries the real modifier flag"));
+        send(context,(1<<13)|(1<<7)|(1<<9),0,0,0);
+        context.runOnClient(client -> require((((ProbeInventory)client.screen).clickModifiers & GLFW.GLFW_MOD_CONTROL)!=0
+                && (((ProbeInventory)client.screen).clickModifiers & GLFW.GLFW_MOD_SHIFT)==0,
+                "Ctrl-click replaces Shift without stale modifier flags"));
+        send(context,(1<<7)|(1<<9),0,0,0);
+        context.runOnClient(client -> require(((ProbeInventory)client.screen).clickModifiers==0,
+                "ordinary inventory click clears model modifiers"));
+        context.runOnClient(client -> { executor.stop(sink); client.setScreen(null); });
+        context.waitTick();
+        cn.vabpnn.mod.VabpnnMod.LOGGER.info("PASS: Ctrl sprint, Shift sneak, simultaneous holds, release and inventory modifier clicks.");
+    }
     private static String cleanupState(Minecraft client,MinecraftInputSink sink) {
         try {
         var counter=net.minecraft.client.KeyMapping.class.getDeclaredField("clickCount"); counter.setAccessible(true);
@@ -303,10 +365,12 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
     }
     private static final class ProbeInventory extends InventoryScreen {
         double clickX=Double.NaN,clickY=Double.NaN;
+        int clickModifiers;
         ProbeInventory(LocalPlayer player) { super(player); }
         @Override public boolean mouseClicked(MouseButtonEvent event,boolean doubleClick) {
-            clickX=event.x(); clickY=event.y();
+            clickX=event.x(); clickY=event.y(); clickModifiers=event.modifiers();
             return super.mouseClicked(event,doubleClick);
         }
     }
 }
+
