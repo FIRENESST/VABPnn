@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "phase": "complete_installed_compare_1_0_2_and_telemetry_0_4_0",
+  "owner": "model-executor",
+  "target": "Compare/compare-1.0.2",
+  "scorer_protocol": "vabpnn-reward-v1",
+  "accepted_scorer_changes": [
+    "GET /v1/training",
+    "GET /v1/rewards?after=...&stream_id=...",
+    "POST /v1/training-status",
+    "TelemetryMod.trainingContext() reflection"
+  ],
+  "clock": "integrated_server_tick",
+  "reward_interval": "(start_tick,tick]",
+  "latest_user_constraint": "Continuous control AND prediction-only must enforce learned confidence thresholds; retain weight freeze and dynamic memory.",
+  "design": {
+    "mode": "Explicit /vabpnn selftrain on|off; F8/predict exits self-training and freezes learning.",
+    "pairing": "Only successfully applied fresh command packets, current world/player/session/dimension, native proposal frame and exact authoritative server tick; invalidate on stream/gap/binding/pause/epoch/config changes.",
+    "optimizer": "Cached GPU policy-state snapshots, genuine on-policy REINFORCE for stochastic action selection and k; reject missing/mismatched/expired/duplicate execution evidence. Separate reward optimizer state.",
+    "scope": "Initial reward endpoint trains decision evidence and k heads only; PNN/full dense graph/JEPA remain frozen during reward rollouts and continue normal demonstration learning outside selftrain. Unsupported trainable modules explicitly reported, no reward-scaled imitation.",
+    "testing": "Isolated model/checkpoint; positive/negative update direction, zero reward/no match/no valid execution/F8/predict no updates; dedupe/gaps/world switches; real Java/JNI/CUDA plus game telemetry."
+  },
+  "needed_context": [
+    "world_id",
+    "player_id",
+    "session_id",
+    "tick",
+    "dimension",
+    "observed_at_ms",
+    "authority",
+    "game_mode"
+  ],
+  "notes": [
+    "Installed model compare-1.0.2 and telemetry 0.4.0; old compare-1.0.1 and telemetry 0.3.0 retained disabled; user models unchanged.",
+    "Default demonstration learning unchanged; explicit selftrain trains policy_heads only, no PNN/graph/JEPA reward training claimed.",
+    "F8/predict freeze all neural parameters and reward optimizer; dynamic matrix memory/salience/CSR continue.",
+    "Continuous prediction/control and reward sampling strictly enforce confidence > learned threshold.",
+    "Actual game positive/damage/death reward updates and F9 during death grace, manual takeover/respawn/off protections pass.",
+    "On-policy stale/death windows are rejected, never forced through; a delayed ordinary update invalidating a terminal window was observed and safely frozen.",
+    "Restart Minecraft and Scorer to load installed artifacts; no test fixtures copied to user models."
+  ],
+  "numeric_evidence": {
+    "score_parameters": 1022,
+    "nonzero_gradients": 458,
+    "max_finite_difference_error": 0.000012,
+    "positive_negative_direction": "passed",
+    "freeze_zero_duplicate_mask_epoch_policy_version": "passed",
+    "consecutive_nonblocking_receipts": "passed"
+  },
+  "transport_assignment": {
+    "owner": "Scorer thread",
+    "authorized": true,
+    "file": "Compare/compare-1.0.2/Mod/src/client/java/cn/vabpnn/mod/client/capture/ScorerRewardTransport.java",
+    "package": "cn.vabpnn.mod.client.capture",
+    "api": [
+      "public final class ScorerRewardTransport implements AutoCloseable",
+      "constructor ScorerRewardTransport(java.net.URI endpoint)",
+      "CompletableFuture<JsonObject> handshake()",
+      "CompletableFuture<JsonObject> rewards(long after,String streamId)",
+      "CompletableFuture<JsonObject> report(JsonObject status)",
+      "void close()"
+    ],
+    "constraints": [
+      "Transport only; no Minecraft mode/action pairing/ledger dependencies",
+      "Loopback-only endpoint validation; async network/body read off Minecraft thread",
+      "Bounded 2 MB JSON response, 500ms connect and <=1500ms request timeout",
+      "Preserve stream/gap/error JSON; reject non-2xx, malformed JSON and oversized body",
+      "Use existing Gson, no new runtime dependencies"
+    ],
+    "optional_test": "Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/ScorerRewardTransportTest.java with public static run(); I will invoke it from GL smoke main.",
+    "do_not_edit": [
+      "CaptureController.java",
+      "NativeCudaBridge.java",
+      "RewardLedger.java",
+      "SelfTrainingController.java",
+      "build.gradle",
+      "gradle scripts",
+      "OpenGlCaptureSmokeTest.java"
+    ],
+    "state": "accepted; please implement now"
+  },
+  "game_validation": {
+    "schema": 1,
+    "exit_code": 0,
+    "directory": "C:\\Users\\43828\\Desktop\\MyProject\\VABPnn\\Compare\\compare-1.0.2\\Mod\\build\\reward-game-20261013T104946623",
+    "model": "C:\\Users\\43828\\Desktop\\MyProject\\VABPnn\\Compare\\compare-1.0.2\\Mod\\build\\reward-game-20261013T104946623\\isolated-model.bin",
+    "scorer_pid": 118640,
+    "port": 19877
+  },
+  "completed_utc": "2026-10-13T11:01:51.176Z",
+  "installed": {
+    "model": {
+      "target": "D:\\Minecraft\\JavaEdition\\BlockHelm\\.minecraft\\versions\\26.1-fabric-0.19.3\\mods\\vabpnn-compare-1.0.2.jar",
+      "sha256": "F8338E1C419434781869B3E46155010D473A2E2DF96057209B73AB77816CD8B4",
+      "bytes": 2543277
+    },
+    "telemetry": {
+      "installed_utc": "2026-10-14T00:40:16.239787+08:00",
+      "target": "D:\\Minecraft\\JavaEdition\\BlockHelm\\.minecraft\\versions\\26.1-fabric-0.19.3\\mods\\vabpnn-telemetry-0.5.0.jar",
+      "telemetry_sha256": "421A3CB6B8D78CA35B0F5CEEADCB31F922EE4C7D652871B179AE0DBB619AC401",
+      "scorer_sha256": "9B069AA8228C0C567518347F26607A160253D3FC2A7834CA7B8419863D6FF5E1"
+    },
+    "prior_source_files": 107,
+    "preserved_history_packages": 28,
+    "unchanged_user_models": 11
+  },
+  "validation": {
+    "native": "Mod/reward-tests-v2.log: all operators, exact REINFORCE score finite differences, positive/negative/zero, duplicate/frozen/epoch/mask/policy version, consecutive nonblocking receipts passed",
+    "gl": "Mod/reward-gl-validation.log: Transport, Ledger, actual GL/JNI/CUDA execution receipt/rewards, v11 checkpoint/freeze/restart, only 1022 policy parameters update",
+    "real_game": "C:\\Users\\43828\\Desktop\\MyProject\\VABPnn\\Compare\\compare-1.0.2\\Mod\\build\\reward-game-20261013T104946623\\game-validation.log",
+    "default_flow": "Mod/reward-default-and-build.log: default demo/start-only/F8 thresholds/predict/inventory/Ctrl/Shift/15-actions/position/meme/stop/restart/leave-world plus production build passed",
+    "artifacts": "Mod/build/reward-artifacts.json: metadata, packaged native bytes, 12 VS CUDA entries, 27 operator source files, no runtime test/model/telemetry leaks",
+    "deployment": "Mod/build/reward-deployment.json"
+  },
+  "scorer_respawn_update": {
+    "version": "0.5.0",
+    "status": "installed_verified",
+    "user_selection": "Reset per-life score, automatic stage and records; keep all current scoring weights, manual configuration and logs.",
+    "immediate_respawn": true,
+    "notification_endpoint": "configured /v1/chat/completions",
+    "notification_delivery": "independent of minute analysis; persistent queue, retry, deduplication, response does not apply weights",
+    "stale_advice": "configuration/stage version guard",
+    "model_package_unchanged": "F8338E1C419434781869B3E46155010D473A2E2DF96057209B73AB77816CD8B4",
+    "validation": "Scorer/build/respawn-release-validation.json"
+  }
+}

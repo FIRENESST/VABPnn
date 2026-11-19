@@ -1,0 +1,502 @@
+[
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/VabpnnClient.java",
+    "sha256": "7B92DC79333B57F8B3F7E45811C6F1827BAAE966AA8CBFB831651B6C1371EAEE"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/ActionExecutor.java",
+    "sha256": "523E854775F3C24AEDE32A4517E159815AB61CFA32925102052B5EF8EF2ADF9A"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/ActionLayout.java",
+    "sha256": "F1382BAE2032BA4F29BA9F2B40AD8375E3B9DA93DC149744129DB8BC1C325179"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/CaptureController.java",
+    "sha256": "0740A89E84C8BAA5FD723C53E376A6072E944A2ABFF792E3C6A0E6FFA9EAE55F"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/DemonstrationInput.java",
+    "sha256": "7CA071652E4AC89C1B17D3A4D3BF8D90F2164F69307A523A37488B668AB61824"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/InGameFeedback.java",
+    "sha256": "19086C53CF741E769BC6FBCB1CD2FF7B1E35CF449EB5DA6B0E83C8133D722604"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/MinecraftInputSink.java",
+    "sha256": "6AF9A9470ADA025CDC0B18BECC8E183D9F8D64C27410ABC5F3D3349674DF337D"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/NativeCudaBridge.java",
+    "sha256": "4EA6D885806DC7980CF7DE37C8DDD6CA2671297DCB6E5AF4733AC743E63B4548"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/OpenGlCaptureSurface.java",
+    "sha256": "DFBFAA93FA665E46ED7FA745E2115294A110559F7F315AFFD2F660FE2E801D13"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/PlayerPositionSampler.java",
+    "sha256": "651A089E81D67DDED0779B9135FB4073263A36CC8CED683EA91C631E9D27161B"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/RewardLedger.java",
+    "sha256": "56B4EC011F476AD45F38BF83EF2263E0EAB07774105F37F3935C5891E02B4959"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/ScorerRewardTransport.java",
+    "sha256": "8DFC2334550BD526AC84C0965F951CF23A81B3615B9DF64A4FA485B3A1E4C77C"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/capture/SelfTrainingController.java",
+    "sha256": "77F6E8C0C43B0F5736B6855320E3E9862D045E5AD04B51F7D0D6233A698151FB"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/scope/MemePropagationMonitor.java",
+    "sha256": "389DA46066B6C746574B6AFBE4DA3A23D1962E95FD8136322FAF1EB6B1E54369"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/scope/MemePropagationPanel.java",
+    "sha256": "AE585146A065E9DFB92D22790CA91CEA8CD73B4397398FB93E02B9FFD8DE4B90"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/scope/MemeSnapshot.java",
+    "sha256": "A9EEF6EC5A8C7DB67530433DCD950E88779D20A85093C6B2AACC9E4AE581869D"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/scope/MouseMotionTracker.java",
+    "sha256": "CBFA16455E824E4FB481EFE031AEA2FBAD8C1CA734D5C8C67A807FBFB29AEDAB"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/scope/NetworkMonitor.java",
+    "sha256": "42DCE8AD53DCB97C8E2F80E1A370AD086468A46A0A5A424A4431EB276CCAE3E5"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/scope/ScopePanel.java",
+    "sha256": "315777AFA15536783FD0DE410B7552E9AB346D8600C258AEE0DB1FFF482370B8"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/client/scope/ScopeSnapshot.java",
+    "sha256": "31A33A1256D57DC0E3EAD9496DC4B3858B5554EA58961451F1DCF2E1F5B5DF6E"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/DesktopScopeMixin.java",
+    "sha256": "845C20FD5F64311B6DD485810A63DB7A096E6B8FDCB4F8B120814772D8EFF7DD"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/GameRendererMixin.java",
+    "sha256": "BC60C520B5E661FF65979B0A31BEE6004233ECE2D2E10B6C6C89A37A63EB1A26"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/HumanMouseMixin.java",
+    "sha256": "A5ED40E826740865BB7398827E468B520EF0EDDBB13C11AB94B476CD172237A0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/KeyboardHandlerInvoker.java",
+    "sha256": "D9ABA3BA30DCA20CE872BF56F96A8717F6A4948CA035AB30EB82FACBDBA01213"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/KeyboardHandlerMixin.java",
+    "sha256": "9B0AD6843566FE21341DD544289E9B983635D8B8AB24AE6A4136BAB030BDDFBB"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/KeyMappingAccess.java",
+    "sha256": "F2370256C420F6EAF91F19BED27BF749FEB97DF391EAA34DC7C7F7D96AA28736"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/MinecraftClientMixin.java",
+    "sha256": "9495EBE2FFD1FE89E89532F865FAEF04C01515AD411457077314A4F7E507ADD9"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/MouseHandlerAccess.java",
+    "sha256": "28E8261A3CFC49C426D6DBAB94AD75A4A4C2C042C0039A35A89DE7E625389BCE"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/java/cn/vabpnn/mod/mixin/client/ToggleKeyMappingAccess.java",
+    "sha256": "7E783BCC2661D96E5AD10C3FFBF67661ACAC1A21F8168A240F88DA9981326D2E"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/client/resources/vabpnn.client.mixins.json",
+    "sha256": "0165552B3EEB5A7C71D2BB9878CEDB7E24B7CF6E345F6E87CAAEEC21EFF6685E"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/gametest/java/cn/vabpnn/mod/client/capture/MinecraftActionsGameTest.java",
+    "sha256": "992256997D0601410689DB9A20925F219DF899E68A59C16CB970110561BEE03F"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/gametest/java/cn/vabpnn/mod/client/capture/MinecraftFeedbackChecks.java",
+    "sha256": "4D8B4A6799F6911D9335C33E5005B79D921277030A2CF17F602AF503011628EA"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/gametest/java/cn/vabpnn/mod/client/capture/MinecraftRewardChecks.java",
+    "sha256": "7AA6FED1FDA420EA521B5BB337770DE4961184D1A8136EB94F8F811B25819BBF"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/gametest/resources/fabric.mod.json",
+    "sha256": "133BE37D84958A94E2CE3848B14DFA8C4C317EF3761E276B9F4973BE5B9459F8"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/ActionExecutorTest.java",
+    "sha256": "E4758F20CE144A25192101479272B1C8E9C61DD5B9601117E1C5D5A139EC9F12"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/CheckpointTestSupport.java",
+    "sha256": "B4EF13D4818507E71722B5359395FE13B16F13AA7B168E68629665ACDA65FC33"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/DemonstrationInputTest.java",
+    "sha256": "A9F61DDE03D7C4DE54B9741A26D120126110EEBC1B54D305605CAE26619D1E1F"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/OpenGlCaptureSmokeTest.java",
+    "sha256": "8E291355A938D2B8A9C0F2E298732CE060CEF1997FC5232D68825B4179B9BC28"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/PlayerPositionSamplerTest.java",
+    "sha256": "ACC36BC5090A1AC9C1A0436B80E9949162418DED852FE46995F4EF77773CBF3F"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/RewardLedgerTest.java",
+    "sha256": "7E8757EA0618B44667F8E9E8D97D968EFAE3D3400647E880A65E83D3CE06DA85"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/capture/ScorerRewardTransportTest.java",
+    "sha256": "F41175C9A1B2AD6B667FEDB583AE18A48FF03F453D6527EF2601E180B883E7C5"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/scope/MemeWindowRenderTest.java",
+    "sha256": "9E1B38B94E6CA923F8F5EB4E3E57328F03BCE6DAAD0417EF9BD139B0778C81DF"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/scope/MouseMotionTrackerTest.java",
+    "sha256": "7C111BADA456695E25AB662DA327D7BDE9BBEB7EEC75F53ADDE9A85D86D4D758"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/glSmokeTest/java/cn/vabpnn/mod/client/scope/ScopeRenderTest.java",
+    "sha256": "C1043CBE13805476914209FB7DE997496A5EB94D518BD5300DA50444F3E23C34"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/main/java/cn/vabpnn/mod/VabpnnMod.java",
+    "sha256": "7BF2C569DAA679E48E550F169874EBE9926A3623065DE3DE38347730842BE36E"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/main/java/cn/vabpnn/mod/mixin/MinecraftServerMixin.java",
+    "sha256": "CAAF3F9D651721EAA8AF102EF6EFA47B8CF23D366662A30DBE0A56D0655A83ED"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/main/resources/fabric.mod.json",
+    "sha256": "6ABE0EAF6DB8F2356492B6D19804FBFBB06A540B2A70AB44D34E6ADDB462FBC1"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/main/resources/vabpnn.mixins.json",
+    "sha256": "5462721C9B092B8C3705DE9D9DA7870BA60DD16DD801FEC1B3FF3F24FE69165D"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/main/resources/assets/vabpnn/lang/en_us.json",
+    "sha256": "ADBF991F10E2DB6B0EFD8AE93C714A09E963BE68C64828E4DA52EC90193780D8"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/src/main/resources/assets/vabpnn/lang/zh_cn.json",
+    "sha256": "C2F3BC6D50E186202FB2276B77103AA0365DA3756C994A69CAEAE27E856C83EF"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/action_checkpoint_migration.h",
+    "sha256": "6290DBC683D0D7B7063073CD6F691EE13D9502EF30FCA250C5D3B9AF31C3BF12"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/build-native.ps1",
+    "sha256": "EF50DC633D505F61FB55C6974F45010C6F88FF166A92A7636C60717C88A99526"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/capture_bridge.cu",
+    "sha256": "90D1DF4DDB4BBE35363B40B06BB37A004363647F499E14C20ECDED933E36F674"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/compare_checkpoint_migration.h",
+    "sha256": "222320ABC697DE02AA5E3194674CBDE24A7091A0D50B91DB7A12C0ABF5A13A5B"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/frame_operator.h",
+    "sha256": "596AE1383D5D985B5D3E49F43D76FAFE02A566C99BBEF2551FF409AC60813806"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/model_checkpoint.h",
+    "sha256": "434058796A8F2FF44C98096099099F798D2CE4420DDE5D281BF1DD2EDAB11048"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/reward_bridge.h",
+    "sha256": "1C7C9B697CED941758A2178BC4183DC9C1A4BF9B53859E75D241BD9BF1E47870"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/benchmarks/dense_compare_benchmark.cu",
+    "sha256": "0ECBF35A064EA68991903F485DDB43E72062606A39C50D545B90933106B76262"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/benchmarks/frame_budget_benchmark.cu",
+    "sha256": "6467A19D38D11E132BDF8AC8CFF36572B93E477136499E4A06FA2C073519E101"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/build/cache.ps1",
+    "sha256": "4602BF1EB757F5D8FBBD8D8B8E4F446E0F3EBA8E5B7F6D1E9438793D51D19FB4"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/build/production.ps1",
+    "sha256": "32B6599CE6BFDDD9FD1EB0B221C7DD83168C8074A6F1046E206FBDC1F4CB564B"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/build/toolchain.ps1",
+    "sha256": "B1D5867786583EFECFA4287E63CBC38E68BA3D2FAB91FA0339BB0BCAADDFD4B2"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/build/verification.ps1",
+    "sha256": "2F8A277C0A2DA29AE1FF316616ED3FEE67051114A010DB85C1C5E8819676B078"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/action_checkpoint_test.cu",
+    "sha256": "6EE941396F80739D66291AE2D9900EF15813D8C686C4CE07C82A061BF2295AB5"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/bayesian_motion_test.cu",
+    "sha256": "6F017316D4051DC1559B45EBF77901802C22DF0BD7B644C8336DF424A2D6DBCA"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/block_controllers_test.cu",
+    "sha256": "9CB11D5D2DBA161CC3BF858AE12E3C2B2C2154B11AD085CB94E5FCA25A43373E"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/dense_block_transformer_test.cu",
+    "sha256": "F12448E8F7153CFBE8458B6050CFDB014FEC09C090B77D14F7D304E3DDD3B7C3"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/dense_memory_checks.h",
+    "sha256": "074FCD9F9CA7E90A7471F5F30BFE7F37DA9795CDA79D6D1AA2CF72969B685F76"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/dense_migration_checks.h",
+    "sha256": "E638452D102067A3E4535A6C58E955258A17788BF0063DE0F50DFBF72A7FC8EA"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/dense_policy_checks.h",
+    "sha256": "3AEF06B08315A1EF15EE31F910EF117A727F35469E9902E39E11F0BCA160BE4A"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/evaluation_mode_test.cu",
+    "sha256": "783E0142DB56ECAA50AC448D0DE56EEF0629A7C79C8C3926D8F0D53BACCE10CF"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/jepa_motion_test.cu",
+    "sha256": "481BEE0233B265AC31433B1421F588BD48D2099200FC24095CE4A620C72E03E0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/meme_scope_test.cu",
+    "sha256": "F5DE5766A12DCEF55D6BF7ACE3AED0965E13E502926551A0FF15798C8E2C5ED1"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/meme_state_test.cu",
+    "sha256": "66818B124E494A15433C74417A5A92715692C99B50592067FE11DEE207D8399A"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/minute_timeline_test.cu",
+    "sha256": "5EFAACD13CD27B2DFD9374153D701AB19C5C451C01F966F9BB6C545AB01A3D00"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/network_scope_test.cu",
+    "sha256": "8D304D731EAA3FA38A854A907912DEE5E05031762C23E36E625DEB415C21AB67"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/neuron_vote_test.cu",
+    "sha256": "27FE5B31B5250C94935D5B76C5745AAA925C5D4D5F998D9DDE33A1C7AC9291E0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/online_learning_test.cu",
+    "sha256": "98BEFD06681537B4C19893B757B83F06F7A92FEDBBCFD653AF5FB56B12237674"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/operator_test.cu",
+    "sha256": "7CBDEAD18A75E4ED8FDCB6000D9A53ADF33EBC2DA41B6D6D8E0AAEDE879544F5"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/performance_equivalence_test.cu",
+    "sha256": "CB089AD9D165C6BEA4F4F5A647E62F8D4A70C6A2A7B900A6588A2722B893B0E0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/player_position_test.cu",
+    "sha256": "58DBAD987785CDAD5A6653466ABD0CBB347C69ADB1BE0241F95EA257B251001C"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/reward_policy_test.cu",
+    "sha256": "9143959D4AF85835865C0BFE1F7CF227EB25A44C60EBCAA8235F2D5FE6DEE4D0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/spike_connections_test.cu",
+    "sha256": "A7950AA690A08DD1C96815F6FDAC8C3B18D19D06378F0843DD34A697F09050AA"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/temporal_decision_test.cu",
+    "sha256": "2136076C9F094F5BABBE6D3544A04653A80CFE5B0CB4AD63E0E2C5AA12721BA4"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/native/tests/threshold_decision_test.cu",
+    "sha256": "4BCBD59C13012A1D98351AEF6D98C3A3FD2DE83FAF93D5050C20DFF4BF95E833"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/gradle/native.gradle",
+    "sha256": "4EC98ABAFFEF0043E5468C5FBFBF0F8E6B999DD1C246CB114E89D79656DD8689"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/gradle/verification.gradle",
+    "sha256": "406B15134496553CCBF5AC67EE029E8F420BFF1281E3188CA7D359943357D02C"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/gradle/wrapper/gradle-wrapper.jar",
+    "sha256": "497C8C2A7E5031F6AA847F88104AA80A93532EC32EE17BDB8D1D2F67A194A9C7"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/gradle/wrapper/gradle-wrapper.properties",
+    "sha256": "081217F9CD27DD16CA051D414B00A06C8ABDAD970EB9B026B66E8C6C22559AB0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/ActionContracts.h",
+    "sha256": "3AD6CB009667A347C05F93451A85F10FF0911BC3126B51E0924270DEB52EC751"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/BlockControllers.cu",
+    "sha256": "06C2EF2E9BF5D8FC278235BEE66CB4AE7682F8F07DBE07017C0EC51057C7E4C0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/BlockControllers.h",
+    "sha256": "B4D46E4331A0CF56D5B5BC44EE30541DD29D0A24F37415C2387FF37FF57DA539"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/DenseBlockTransformer.cu",
+    "sha256": "93826DCDC3B5DC0FCC081BBC7EB5A17AEB386D1B96AA581C61B06DF8BED03C1C"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/DenseBlockTransformer.h",
+    "sha256": "745151E19A29BD7A46BF555C630722DD4690AEEF5B422E6B6A830710372DCBF8"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/File.cu",
+    "sha256": "94088039977787FE209926D0EE3952F98D5981775D085152FAF665C377846F4F"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/FrameOperator.h",
+    "sha256": "92FDA195B55E870B52150E5D340D5FFF3492712C67E3D7DEE181DAA196C1E217"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/GpuFrame.h",
+    "sha256": "8C9DD50EB2DFA9A139916A3A8595EA32C9334F37AAEC2E5BAA1F7651DB60D4F3"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/JepaMotion.cu",
+    "sha256": "F93B96952F7ACFA6F8A5AA8BE9F28AB08EC3006DC89C20EA68D4F4ECD8FDB356"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/JepaMotion.h",
+    "sha256": "36E021ED7BFED8776B6391A6F594E1671A76756CAC26039C03026979E111A2AD"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/MemeState.cu",
+    "sha256": "9A4782058231730A3B1A09064493DEE7A798810652B2DB188FEAA830F0749E4C"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/MemeState.h",
+    "sha256": "C78F36111B92E7300279C113CDD9A4BE06CB54702F002071645DA677F0AB35AE"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/MinuteTimeline.cu",
+    "sha256": "DAD6943F27ABC554235F3CAA1B901FBF7165CE4D1D482F2BCA29D261556F1FC0"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/MinuteTimeline.h",
+    "sha256": "4172D6DD36B0469F4E8573F3392B6E568251A009B7671E814177222DDDF79161"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/ModelSnapshot.h",
+    "sha256": "7C0B4C85917569B1DAF936C79D6929C43D04C66DBAF5799B420E071AB33890D2"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/NetworkScope.cu",
+    "sha256": "98E46A6C9E57F1C45BF933872D8BB43AE25CB76125D3ABB23C37CFEB2EE6266A"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/NetworkScope.h",
+    "sha256": "ED86AB9198F0CBE56D050552918C9FBCA8F5B46676F9D98E19F8AAD59EA7197E"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/NeuronModel.cu",
+    "sha256": "CF1BD4474B3455B9220EF7194793AEC09D02AEF8171100C169B0A61532725350"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/NeuronModel.h",
+    "sha256": "A1EAD19A995D2062BCDEC340C0D39F716A03C2FD326770F68600295ED4CB8067"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/OnlineLearning.cu",
+    "sha256": "B4D5B75A53EC81501FF9FC93A1007D1BA8652B1615FCFA4E0CD15757188731FB"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/OnlineLearning.h",
+    "sha256": "F1B431A39CD0803D2D0E17B4A3FE2C17B28953E35DF7C48DE854AE353FB6B78C"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/RewardPolicy.cu",
+    "sha256": "91683F0B0D8AF558FD343961C100694C347FC9C170833CA327B67B166924942D"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/RewardPolicy.h",
+    "sha256": "5D2C70112D2B0A367AE9A566D9C44C7872455C865FA40E53EB8B64C6CE22D1C8"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/SelfCudaKernel.vcxproj",
+    "sha256": "03EFF43FA00E4319712AE63CF6E949F586CD0394A5E92985EB211438890445FB"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/SelfCudaKernel.vcxproj.filters",
+    "sha256": "428E42D540E0E7F11425810AD37EA0B684550B327D67AC432EA0D07790A02C74"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/SpikeConnections.cu",
+    "sha256": "3C143CD79DDD2CA444E602F26D0780D77170EC48A22AC750868C2E7457B4F5EC"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/SpikeConnections.h",
+    "sha256": "AD40A5DF6B76BDEB237E8554FCF766085E7E82C6D80F9335A9CFB5F5B200FE99"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/TemporalDecision.cu",
+    "sha256": "6C22438432B3987431AF74A2E0123725AE1B67DA3E72D4EBD3812AF8458AC0B4"
+  },
+  {
+    "path": "Compare/compare-1.0.3/CUDAkernel/SelfCudaKernel/SelfCudaKernel/TemporalDecision.h",
+    "sha256": "AC4C60FB4E8BEC439C4C35A32D5F49D44D6390A700ED06CB6701294CF3042559"
+  },
+  {
+    "path": "Compare/compare-1.0.3/README.md",
+    "sha256": "5F59743A77ECB1FE9CF09F09A89CC746542D658A78D5C6920FEFD1EFF4D303BD"
+  },
+  {
+    "path": "Compare/compare-1.0.3/install-mod.ps1",
+    "sha256": "BD33B61A8B73D013458050A8F317AC83F7529FBB557C0F18490C41563521E9A2"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/build.gradle",
+    "sha256": "D7487FAA6F4634A96B868AFFA2C25799C80186F2E525942E0737ECD375E3A438"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/settings.gradle",
+    "sha256": "D3DB99BF9C6902738BE4AA2FF5E4B126B1BB66C38482069313347F4B32944FFE"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/gradle.properties",
+    "sha256": "29D34009EE1FB44A68D8FFC4E4D8B70CF6E89D3F8B99DC8109814E9231D8FFF1"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/gradlew",
+    "sha256": "45BDA8DEAEF01B732F07BD317F962A736E349C6FAA6662829BC0F41293B51212"
+  },
+  {
+    "path": "Compare/compare-1.0.3/Mod/gradlew.bat",
+    "sha256": "EBB7D294B52A21BC988B35600190EA8AFD626AEFE9732F260A24D28694D43C46"
+  }
+]

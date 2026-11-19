@@ -1,0 +1,65 @@
+// Explicit opt-in runtime addon. Its classes and mixins never enter the release jar.
+sourceSets {
+    backgroundTraining {
+        compileClasspath += sourceSets.main.output + sourceSets.client.output + sourceSets.client.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.client.output + sourceSets.client.runtimeClasspath
+    }
+}
+loom {
+    mods {
+        "vabpnn-background-runtime" { sourceSet sourceSets.backgroundTraining }
+    }
+    runs {
+        backgroundTraining {
+            client()
+            configName = "VABPnn hidden background training"
+            ideConfigGenerated = false
+            source(sourceSets.backgroundTraining)
+            runDir = "run/background-training"
+            vmArg "-Dvabpnn.background.training=true"
+            vmArg "-Dvabpnn.selftrain.modules=all"
+            vmArg "-Dvabpnn.background.directory=${file('run/background-training').absolutePath}"
+            vmArg "-Dvabpnn.model.path=${file("run/background-training/vabpnn/models/release-${project.version}.bin").absolutePath}"
+            vmArg "-Dvabpnn.memory.path=${file("run/background-training/vabpnn/memory/experience-${project.version}.vdb").absolutePath}"
+            vmArg "-Dvabpnn.scope.enabled=false"
+            vmArg "-Dvabpnn.memeScope.enabled=false"
+            vmArg "-Dvabpnn.scorer.endpoint=http://127.0.0.1:9876"
+            vmArg "-Dvabpnn.scorer.url=http://127.0.0.1:9876"
+            vmArg "--enable-native-access=ALL-UNNAMED"
+            vmArg "-Xmx4G"
+            programArgs "--username", "VABPnnTrainer", "--width", "1920", "--height", "1024",
+                    "--quickPlaySingleplayer", "training-world", "--uuid", "e6dfb593-559e-3aab-a1f4-c9930e21f0b9"
+        }
+    }
+}
+dependencies { backgroundTrainingRuntimeOnly files('../Scorer/build/libs/vabpnn-telemetry-0.5.0.jar') }
+tasks.named('compileBackgroundTrainingJava') { dependsOn tasks.named('clientClasses') }
+
+// Export the configured Java launch; the detached javaw process does not need a live Gradle build.
+tasks.register('prepareBackgroundTraining') {
+    def runner = tasks.named('runBackgroundTraining')
+    dependsOn { runner.get().taskDependencies.getDependencies(runner.get()) }
+    doLast {
+        def run = runner.get()
+        def values = []
+        def runtime = file('run/background-training')
+        copy { from file('.gradle/loom-cache/launch.cfg'); into runtime }
+        def jvm = run.allJvmArgs.findAll { !it.startsWith('@') }.collect { value ->
+            value.startsWith('-Dfabric.dli.config=') ? '-Dfabric.dli.config=' + new File(runtime, 'launch.cfg').absolutePath : value
+        }
+        def arguments = new ArrayList(run.args)
+        run.argumentProviders.each { arguments.addAll(it.asArguments()) }
+        values.addAll(jvm)
+        values.addAll(['-cp', run.classpath.asPath, run.mainClass.get()])
+        values.addAll(arguments)
+        def output = file('run/background-training/java-arguments.txt')
+        output.parentFile.mkdirs()
+        output.setText(values.collect { value ->
+            '"' + value.toString().replace('\\', '\\\\').replace('"', '\\"') + '"'
+        }.join('\n') + '\n', 'UTF-8')
+        file('run/background-training/launch-info.json').setText(groovy.json.JsonOutput.prettyPrint(
+            groovy.json.JsonOutput.toJson([main:run.mainClass.get(), workingDirectory:file('run/background-training').absolutePath,
+                classpath:run.classpath.files.collect{it.absolutePath}, jvmArgs:jvm, args:arguments])), 'UTF-8')
+        println('Prepared invisible background client launch: ' + output.absolutePath)
+    }
+}

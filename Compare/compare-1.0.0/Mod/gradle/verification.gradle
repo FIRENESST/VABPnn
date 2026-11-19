@@ -1,0 +1,58 @@
+// Java/UI/GL/Minecraft fixtures run separately from production packaging.
+tasks.named("runClient", JavaExec) {
+    systemProperty("vabpnn.scope.enabled",providers.gradleProperty("networkScope").getOrElse("true"))
+    systemProperty("vabpnn.memeScope.enabled",providers.gradleProperty("memeScope").getOrElse("true"))
+    systemProperty("vabpnn.cuda.smokeFrames", providers.gradleProperty("gpuSmokeFrames").getOrElse("0"))
+    systemProperty("vabpnn.cuda.capacity", providers.systemProperty("vabpnn.cuda.capacity").getOrElse("4"))
+}
+sourceSets {
+    glSmokeTest {
+        compileClasspath += sourceSets.client.compileClasspath + sourceSets.client.output
+        runtimeClasspath += sourceSets.client.runtimeClasspath + sourceSets.client.output
+    }
+}
+tasks.register("glCaptureSmokeTest", JavaExec) {
+    group = "verification"
+    description = "Check continuous CUDA interop, backpressure, resize and GL state on the NVIDIA GPU."
+    dependsOn(tasks.named("glSmokeTestClasses"))
+    classpath = sourceSets.glSmokeTest.runtimeClasspath
+    mainClass = "cn.vabpnn.mod.client.capture.OpenGlCaptureSmokeTest"
+    def compatibilityCheckpoint = providers.gradleProperty("compatibilityCheckpoint")
+    if (compatibilityCheckpoint.isPresent()) {
+        systemProperty("vabpnn.test.checkpoint", compatibilityCheckpoint.get())
+    }
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+}
+
+tasks.register("scopeUiSmokeTest",JavaExec) {
+    group="verification"
+    description="Check live scope rendering, inspection coordinates and window lifecycle."
+    dependsOn(tasks.named("glSmokeTestClasses"))
+    classpath=sourceSets.glSmokeTest.runtimeClasspath
+    mainClass="cn.vabpnn.mod.client.scope.ScopeRenderTest"
+}
+
+ // Run real Minecraft input tests from a separate test mod and temporary world.
+fabricApi {
+    configureTests {
+        createSourceSet = true
+        modId = "vabpnn-action-test"
+        enableGameTests = false
+        enableClientGameTests = true
+        eula = true
+    }
+}
+tasks.named("runClientGameTest",JavaExec) {
+    systemProperty("vabpnn.scope.enabled","false")
+    systemProperty("vabpnn.memeScope.enabled","false")
+    systemProperty("vabpnn.cuda.smokeFrames","0")
+}
+
+
+tasks.register("memeScopeUiSmokeTest",JavaExec) {
+    group="verification"
+    description="Check the independent 5 Hz meme viewer, selection, snapshots and lifecycle."
+    dependsOn(tasks.named("glSmokeTestClasses"))
+    classpath=sourceSets.glSmokeTest.runtimeClasspath
+    mainClass="cn.vabpnn.mod.client.scope.MemeWindowRenderTest"
+}

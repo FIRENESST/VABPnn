@@ -78,3 +78,8 @@ publishing {
 // Build integration and verification keep their own source/target definitions.
 apply from: "gradle/native.gradle"
 apply from: "gradle/verification.gradle"
+
+// Isolated background runtime is available only when explicitly requested.
+if (providers.gradleProperty("backgroundTraining").isPresent()) {
+    apply from: "gradle/background-training.gradle"
+}

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Contracts" />
+    <Filter Include="Vision" />
+    <Filter Include="Temporal" />
+    <Filter Include="Representation" />
+    <Filter Include="Learning" />
+    <Filter Include="Connectivity" />
+    <Filter Include="Telemetry" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="ActionContracts.h"><Filter>Contracts</Filter></ClInclude>
+    <ClInclude Include="GpuFrame.h"><Filter>Contracts</Filter></ClInclude>
+    <ClInclude Include="FrameOperator.h"><Filter>Contracts</Filter></ClInclude>
+    <ClInclude Include="ModelSnapshot.h"><Filter>Contracts</Filter></ClInclude>
+    <CudaCompile Include="File.cu"><Filter>Vision</Filter></CudaCompile>
+    <CudaCompile Include="NeuronModel.cu"><Filter>Vision</Filter></CudaCompile>
+    <ClInclude Include="NeuronModel.h"><Filter>Vision</Filter></ClInclude>
+    <CudaCompile Include="TemporalDecision.cu"><Filter>Temporal</Filter></CudaCompile>
+    <CudaCompile Include="DenseBlockTransformer.cu"><Filter>Temporal</Filter></CudaCompile>
+    <CudaCompile Include="RewardPolicy.cu"><Filter>Temporal</Filter></CudaCompile>
+    <ClInclude Include="TemporalDecision.h"><Filter>Temporal</Filter></ClInclude>
+    <ClInclude Include="DenseBlockTransformer.h"><Filter>Temporal</Filter></ClInclude>
+    <ClInclude Include="RewardPolicy.h"><Filter>Temporal</Filter></ClInclude>
+    <CudaCompile Include="MinuteTimeline.cu"><Filter>Temporal</Filter></CudaCompile>
+    <ClInclude Include="MinuteTimeline.h"><Filter>Temporal</Filter></ClInclude>
+    <CudaCompile Include="JepaMotion.cu"><Filter>Representation</Filter></CudaCompile>
+    <ClInclude Include="JepaMotion.h"><Filter>Representation</Filter></ClInclude>
+    <CudaCompile Include="OnlineLearning.cu"><Filter>Learning</Filter></CudaCompile>
+    <ClInclude Include="OnlineLearning.h"><Filter>Learning</Filter></ClInclude>
+    <CudaCompile Include="BlockControllers.cu"><Filter>Learning</Filter></CudaCompile>
+    <ClInclude Include="BlockControllers.h"><Filter>Learning</Filter></ClInclude>
+    <CudaCompile Include="MemeState.cu"><Filter>Learning</Filter></CudaCompile>
+    <ClInclude Include="MemeState.h"><Filter>Learning</Filter></ClInclude>
+    <CudaCompile Include="SpikeConnections.cu"><Filter>Connectivity</Filter></CudaCompile>
+    <ClInclude Include="SpikeConnections.h"><Filter>Connectivity</Filter></ClInclude>
+    <CudaCompile Include="NetworkScope.cu"><Filter>Telemetry</Filter></CudaCompile>
+    <ClInclude Include="NetworkScope.h"><Filter>Telemetry</Filter></ClInclude>
+  </ItemGroup>
+</Project>

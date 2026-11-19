@@ -6,6 +6,10 @@ import cn.vabpnn.mod.client.scope.MemeSnapshot;
 import org.lwjgl.glfw.GLFWErrorCallback;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.system.MemoryStack;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.nio.file.Files;
 
 import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.opengl.GL33C.*;
@@ -275,14 +279,14 @@ public final class OpenGlCaptureSmokeTest {
                 waitPhase(bridge,NativeCudaBridge.READY);
         java.nio.file.Path directory=java.nio.file.Files.createTempDirectory(java.nio.file.Path.of("build/native"),"evaluation-jni-");
         var previous=directory.resolve("release-1.1.0.bin");
-        var current=directory.resolve("release-1.4.0.bin");
+        var current=directory.resolve("release-1.4.2.bin");
         String checkpointProperty=System.getProperty("vabpnn.test.checkpoint","");
         java.nio.file.Path userSource=checkpointProperty.isBlank() ? null:java.nio.file.Path.of(checkpointProperty);
         byte[] userDigest=userSource==null ? null:fileDigest(userSource);
         if(userSource!=null) {
             try(var file=java.nio.channels.FileChannel.open(userSource,java.nio.file.StandardOpenOption.READ)) {
                 var header=readCheckpointBytes(file,0,256);
-                previous=directory.resolve(header.getLong(8)==8 ? "release-1.4.0.bin":
+                previous=directory.resolve(header.getLong(8)==15 || header.getLong(8)==13 ? "release-1.4.2.bin":header.getLong(8)==12 ? "release-1.4.1.bin":header.getLong(8)==8 ? "release-1.4.0.bin":
                         header.getLong(8)==7 ? "release-1.3.0.bin":"release-1.1.0.bin");
             }
             java.nio.file.Files.copy(userSource,previous);
@@ -316,29 +320,144 @@ public final class OpenGlCaptureSmokeTest {
                 nanos+=20_000_000L;
                 submitDemo(restored,restoredSurfaces,sample,movement,nanos);
                 long[] actual=new long[9];restored.readTraining(actual);
-                for(int i=0;i<6;++i)require(actual[i]==expected[i],"1.4.1 restores compatible training counters read-only");
+                for(int i=0;i<6;++i)require(actual[i]==expected[i],"1.4.2 restores compatible training counters read-only");
                 require(restored.checkpointMessage().contains("restored"),"formal fallback reaches the JNI worker");
                 waitSave(restored);
-                require(java.nio.file.Files.size(current)==522_109_692L,"v8 appends minute weights and AdamW without changing any of the 18 v7 parts");
+                require(java.nio.file.Files.size(current)==524_566_116L,"v15 appends full-network Adam state while preserving all v13 network parts");
                 long[] clock=new long[5];restored.readTime(clock);
                 require(clock[1]>0 && clock[2]==expectedClock[0] && clock[4]==expectedClock[1] && clock[3]>0,"compatible checkpoint retains minute/mouse steps; frozen inference advances the minute cache");
                 if(original!=null && !previous.equals(current))require(java.util.Arrays.equals(original,fileDigest(previous)),"previous compatible checkpoint retained byte-for-byte");
             } finally {restored.close();closeSurfaces(restoredSurfaces);}
         }
-        System.out.println("PASS: real JNI v8 restart into weight-frozen 1.4.1; training counters retained; supplied v6/v7/v8 source is read-only.");
+        System.out.println("PASS: real JNI v15 restart into weight-frozen 1.4.2; training counters retained; supplied v6/v7/v8 source is read-only.");
         System.out.println("JNI_CHECKPOINT_DIR="+directory.toAbsolutePath());
+        RewardLedgerTest.run();ScorerRewardTransportTest.run();
+        rewardCheckpointSequential(directory.resolve("selftrain"),current);
+        memoryDatabaseThroughJni(directory);
+        alphaPipelineThroughJni(directory.resolve("alpha"),current);
         if(userSource!=null) {
             require(java.util.Arrays.equals(userDigest,fileDigest(userSource)),"real user checkpoint never overwritten");
-            System.out.println("PASS: supplied compatible v6/v7/v8 checkpoint restored through GL/JNI into 1.4.1 with exact training counters; source SHA256 unchanged.");
+            System.out.println("PASS: supplied compatible v6/v7/v8 checkpoint restored through GL/JNI into 1.4.2 with exact training counters; source SHA256 unchanged.");
         }
             } finally {bridge.close();closeSurfaces(surfaces);}
         }
     }
+    private static void alphaPipelineThroughJni(Path directory, Path legacyFixture) throws Exception {
+        Files.createDirectories(directory);
+        var legacy=Files.copy(legacyFixture,directory.resolve("release-1.4.2.bin"));
+        var alpha=directory.resolve("release-2.0.0-alpha.bin");
+        var vector=directory.resolve("experience-2.0.0-alpha.vdb");
+        long[] legacyParts=CheckpointTestSupport.layout(legacy);
+        // Distinguishable PNN seed, with the original checkpoint checksum recomputed.
+        try(var file=java.nio.channels.FileChannel.open(legacy,StandardOpenOption.WRITE)) {
+            file.write(java.nio.ByteBuffer.wrap(new byte[]{1}),legacyParts[0]);
+            var master=java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            master.putFloat(.33f).flip();
+            file.write(master,legacyParts[7]);
+            file.write(java.nio.ByteBuffer.wrap(CheckpointTestSupport.hash(legacy,256,Files.size(legacy)-256)),224);
+        }
+        byte[] seedDigest=fileDigest(legacy);
+        long[] sample=new long[ActionLayout.DEMO_LONGS];
+        sample[0]=901;sample[2]=1;sample[3]=1;sample[ActionLayout.POINTER_MODE_INDEX]=1;
+        double[] motion=new double[3];
+        try(var bridge=new NativeCudaBridge(CAPACITY,true)) {
+            bridge.memoryDatabase(vector);
+            bridge.checkpoint(alpha);
+            var surfaces=allocate(bridge,96,64);
+            try {
+                waitPhase(bridge,NativeCudaBridge.READY);
+                submitDemo(bridge,surfaces,sample,motion,System.nanoTime());
+                require(bridge.checkpointMessage().contains("inherited read-only"),"Alpha selectively inherits the PNN");
+                waitSave(bridge);
+            } finally {bridge.close();closeSurfaces(surfaces);}
+        }
+        require(Arrays.equals(seedDigest,fileDigest(legacy)),"legacy seed stays byte-identical");
+        try(var file=java.nio.channels.FileChannel.open(alpha,StandardOpenOption.READ)) {
+            require(readCheckpointBytes(file,0,256).getLong(8)==16,"distinct Alpha model schema");
+            long[] parts=CheckpointTestSupport.layout(alpha);
+            require(readCheckpointBytes(file,parts[0],1).get(0)==1
+                && readCheckpointBytes(file,parts[7],4).getFloat(0)==.33f,"both PNN forms migrated");
+        }
+
+        var model=directory.resolve("train-alpha.bin");
+        CheckpointTestSupport.seedPolicy(alpha,model,true);
+        long[] parts=CheckpointTestSupport.layout(model);
+        var decoderBefore=CheckpointTestSupport.hash(model,parts[1],11736);
+        long[] reward=new long[12],proposal=new long[10],command=new long[7],branches=new long[14];
+        try(var bridge=new NativeCudaBridge(CAPACITY,true)) {
+            bridge.memoryDatabase(vector);
+            bridge.checkpoint(model);
+            var surfaces=allocate(bridge,96,64);
+            try {
+                waitPhase(bridge,NativeCudaBridge.READY);
+                submitDemo(bridge,surfaces,sample,motion,System.nanoTime());
+                bridge.rewardMode(91,true,0,false,true);
+                var executor=new ActionExecutor();
+                var sink=new ActionExecutor.Sink() {
+                    public void key(int code,boolean down) {}
+                    public void button(int button,boolean down) {}
+                    public void move(double dx,double dy) {}
+                    public void scroll(double steps) {}
+                };
+                for(int i=0;i<3;++i) {
+                    final long id=i+1;
+                    submitDemo(bridge,surfaces,sample,motion,System.nanoTime());
+                    bridge.readControl(command);
+                    bridge.readRewardProposal(command[0],proposal);
+                    require(proposal[8]==1 && (command[2]==1 || command[2]==2) && proposal[4]==command[2],
+                        "Alpha JNI selects an eligible atomic movement");
+                    executor.apply(command,System.nanoTime(),true,sink);
+                    require(executor.appliedFrame()==command[0],"current action accepted by ActionExecutor");
+                    require(!bridge.rewardExecution(91,command[0],command[1],executor.appliedMask(),
+                        101,101,System.nanoTime(),proposal[3],.25,0,0),"Alpha rejects mismatched delivered displacement");
+                    require(bridge.rewardExecution(91,command[0],command[1],executor.appliedMask(),
+                        101,101,System.nanoTime(),proposal[3],0,0,0),"Alpha accepts exact delivered action and deltas");
+                    float credit=i==0 ? .5f : i==1 ? -.25f : 0f;
+                    require(bridge.reward(91,id,100,120,credit,new long[]{command[0]}),"matched Alpha reward queued");
+                    require(!bridge.reward(91,id,100,120,credit,new long[]{command[0]}),"Alpha duplicate reward refused");
+                    long deadline=System.nanoTime()+10_000_000_000L;
+                    do {
+                        bridge.readRewardStatus(reward);
+                        if(reward[5]>=id)break;
+                        Thread.sleep(5);
+                    } while(System.nanoTime()<deadline);
+                    require(reward[5]==id && reward[2]==Math.min(id,2),"positive/negative Alpha reward updates; zero credit does not");
+                }
+                executor.stop(sink);
+                submitDemo(bridge,surfaces,sample,motion,System.nanoTime());
+                bridge.readFullLearning(branches);
+                require(branches[0]>=2 && branches[1]>=2,"decoder body learns from real JNI receipts in Alpha");
+                bridge.rewardMode(92,false);
+                bridge.resetDecision(frame+1);
+                require(!bridge.reward(91,4,100,120,1,new long[]{command[0]}),"old life/scope reward rejected");
+                waitSave(bridge);
+            } finally {bridge.close();closeSurfaces(surfaces);}
+        }
+        require(!Arrays.equals(decoderBefore,CheckpointTestSupport.hash(model,parts[1],11736)),"saved Alpha Transformer weights changed");
+        var frozen=Files.copy(model,directory.resolve("frozen-alpha.bin"));
+        byte[] memoryBefore=fileDigest(vector);
+        try(var bridge=new NativeCudaBridge(CAPACITY,true)) {
+            bridge.memoryDatabase(vector);
+            bridge.checkpoint(model);
+            var surfaces=allocate(bridge,96,64);
+            try {
+                waitPhase(bridge,NativeCudaBridge.READY);
+                submitDemo(bridge,surfaces,sample,motion,System.nanoTime());
+                bridge.readFullLearning(branches);
+                require(branches[0]>=2 && branches[1]>=2,"new Alpha worker restored optimizer state");
+                waitSave(bridge);
+                CheckpointTestSupport.frozen(frozen,model,false);
+                require(Arrays.equals(memoryBefore,fileDigest(vector)),"Alpha frozen memory stays byte-identical");
+            } finally {bridge.close();closeSurfaces(surfaces);}
+        }
+        System.out.println("PASS: Alpha GL/JNI actions and exact execution receipts, full decoder reward, PNN-only v15 migration, v16 restart and weight/memory freeze.");
+    }
+
     private static long[] readCheckpointTraining(java.nio.file.Path path) throws Exception {
         try(var input=java.nio.channels.FileChannel.open(path,java.nio.file.StandardOpenOption.READ)) {
             var header=readCheckpointBytes(input,0,256);
             require((header.getLong(8)==6 && header.getLong(16)==17) || (header.getLong(8)==7 && header.getLong(16)==18)
-                    || (header.getLong(8)==8 && header.getLong(16)==19),"real checkpoint v6/v7/v8 layout");
+                    || (header.getLong(8)==8 && header.getLong(16)==19) || (header.getLong(8)==12 && header.getLong(16)==20) || (header.getLong(8)==13 && header.getLong(16)==21) || (header.getLong(8)==15 && header.getLong(16)==22),"real checkpoint v6/v7/v8 layout");
             int parts=(int)header.getLong(16);long[] starts=new long[parts],sizes=new long[parts];long offset=256;
             for(int i=0;i<parts;++i){sizes[i]=header.getLong(32+i*8);starts[i]=offset;offset+=sizes[i];}
             require(offset==input.size() && sizes[6]==64 && sizes[8]==34_488,"real checkpoint part sizes");
@@ -352,7 +471,7 @@ public final class OpenGlCaptureSmokeTest {
         try(var input=java.nio.channels.FileChannel.open(path,java.nio.file.StandardOpenOption.READ)) {
             var header=readCheckpointBytes(input,0,256);
             if(header.getLong(8)<8)return new long[2];
-            require(header.getLong(8)==8 && header.getLong(16)==19,"compatible v8 temporal layout");
+            require((header.getLong(8)==8 && header.getLong(16)==19 || header.getLong(8)==12 && header.getLong(16)==20 || header.getLong(8)==13 && header.getLong(16)==21 || header.getLong(8)==15 && header.getLong(16)==22),"compatible v8/v12 temporal layout");
             long offset=256;for(int i=0;i<18;++i)offset+=header.getLong(32+i*8);
             require(header.getLong(32+18*8)==14_216,"compatible minute/Bayesian mouse state");
             var part=readCheckpointBytes(input,offset,14_216);
@@ -394,6 +513,7 @@ public final class OpenGlCaptureSmokeTest {
         surfaces[slot].copyPresentedFrame();
         long fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         glFlush(); long id = ++frame;
+        bridge.memoryContext(new long[]{11,22,33,44,nanos,System.currentTimeMillis()});
         bridge.demonstration(data, movement);
         bridge.position(nanos-5_000_000L,data[0],42.25,64,-7.125);
         require(bridge.submit(slot, fence, id, nanos), "submit human metadata and frame together");
@@ -517,6 +637,136 @@ public final class OpenGlCaptureSmokeTest {
     private static void require(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
+    private static void rewardCheckpointSequential(java.nio.file.Path directory,java.nio.file.Path trained)throws Exception {
+        java.nio.file.Files.createDirectories(directory);
+        var model=directory.resolve("reward-model.bin");var initial=directory.resolve("reward-initial.bin");var updated=directory.resolve("reward-updated.bin");
+        CheckpointTestSupport.seedPolicy(trained,model);java.nio.file.Files.copy(model,initial);
+        long[] sample=new long[ActionLayout.DEMO_LONGS],status=new long[12],proposal=new long[10],command=new long[7],training=new long[9];
+        sample[0]=777;sample[2]=1;sample[3]=1;sample[ActionLayout.POINTER_MODE_INDEX]=1;
+        double[] motion=new double[3];long updates=0;
+        try(var bridge=new NativeCudaBridge(CAPACITY)){
+            var surfaces=allocate(bridge,96,64);
+            try {
+                waitPhase(bridge,NativeCudaBridge.READY);bridge.checkpoint(model);
+                submitDemo(bridge,surfaces,sample,motion,System.nanoTime());bridge.readTraining(training);
+                bridge.rewardMode(10,true);Thread.sleep(30);
+                for(int step=0;step<3;step++){
+                    submitDemo(bridge,surfaces,sample,motion,System.nanoTime());bridge.readControl(command);bridge.readRewardProposal(command[0],proposal);
+                    require(proposal[8]==1 && proposal[2]==10 && command[2]==proposal[4],"matching stochastic proposal and final control");
+                    require((proposal[4]&~proposal[5])==0 && (proposal[5]&~3)==0,"real JNI respects learned fixture thresholds");
+                    require(!bridge.reward(10,step+1,100,120,1,new long[]{command[0]}),"no successful execution proof rejected");
+                    require(!bridge.rewardExecution(10,command[0],command[1],(int)command[2]^4,101,101,System.nanoTime(),proposal[3]),"wrong actual mask rejected");
+                    var sink=new ActionExecutor.Sink(){public void key(int c,boolean d){}public void button(int b,boolean d){}public void move(double x,double y){}public void scroll(double w){}};
+                    var executor=new ActionExecutor();executor.apply(command,System.nanoTime(),true,sink);
+                    require(executor.appliedCommands()==1 && executor.appliedMask()==command[2],"real ActionExecutor accepted packet");
+                    require(bridge.rewardExecution(10,command[0],command[1],executor.appliedMask(),101,101,System.nanoTime(),proposal[3]),"ack actual successful application");
+                    require(!bridge.rewardExecution(10,command[0],command[1],executor.appliedMask(),101,101,System.nanoTime(),proposal[3]),"no duplicate execution receipt");
+                    require(!bridge.reward(10,step+1,101,120,1,new long[]{command[0]}),"open interval excludes start-tick action");
+                    float credit=step==0?1:step==1?-1:0;
+                    require(bridge.reward(10,step+1,100,120,credit,new long[]{command[0]}),"matched receipt queued");
+                    require(!bridge.reward(10,step+1,100,120,credit,new long[]{command[0]}),"duplicate reward rejected");
+                    long deadline=System.nanoTime()+10_000_000_000L;do{bridge.readRewardStatus(status);if(status[5]>=step+1)break;Thread.sleep(5);}while(System.nanoTime()<deadline);
+                    require(status[5]==step+1 && status[2]==Math.min(step+1,2),"positive/negative update, zero receipt no update");
+                    executor.stop(sink);
+                }
+                updates=status[2];require(updates==2,"exactly two reward updates");
+                long[] after=new long[9];bridge.readTraining(after);for(int i=0;i<6;i++)require(training[i]==after[i],"all demo/PNN/JEPA learners frozen during reward");
+                bridge.rewardMode(11,false);
+                require(!bridge.reward(10,4,100,120,1,new long[]{command[0]}),"F8/predict epoch invalidates queued reward");
+                for(int i=0;i<3;i++)submitDemo(bridge,surfaces,sample,motion,System.nanoTime());
+                bridge.readRewardStatus(status);require(status[2]==updates&&status[7]==0,"reward weights frozen");
+                waitSave(bridge);CheckpointTestSupport.frozen(initial,model,true);java.nio.file.Files.copy(model,updated);
+            }finally{bridge.close();closeSurfaces(surfaces);}
+        }
+        require(java.util.Arrays.equals(CheckpointTestSupport.rewardSteps(model),new long[]{2,2}),"separate reward optimizer saved");
+        var previous=directory.resolve("reward-saved.bin");var inherited=directory.resolve("reward-inherited.bin");
+        java.nio.file.Files.copy(model,previous);
+        String previousHash=rangeHash(previous,0,java.nio.file.Files.size(previous));
+        try(var bridge=new NativeCudaBridge(CAPACITY)){
+            var surfaces=allocate(bridge,96,64);try{
+                java.nio.file.Files.copy(model,inherited);
+                waitPhase(bridge,NativeCudaBridge.READY);bridge.checkpoint(inherited);
+                for(int i=0;i<4;i++)submitDemo(bridge,surfaces,sample,motion,System.nanoTime());
+                bridge.readRewardStatus(status);require(status[2]==updates && status[1]==2 && status[7]==0,"v12 reward restart preserves reward optimizer without enabling training");
+                waitSave(bridge);CheckpointTestSupport.frozen(updated,inherited,false);
+                require(previousHash.equals(rangeHash(previous,0,java.nio.file.Files.size(previous))),"previous formal model remains byte-identical");
+            }finally{bridge.close();closeSurfaces(surfaces);}
+        }
+        System.out.println("PASS: formal 1.4.2 v15 reward restart; all neural parameters/moments/reward counters exact, original SHA unchanged, exploration defaults off.");
+        System.out.println("PASS: real GL/JNI/CUDA reward proposals -> successful ActionExecutor receipts -> positive/negative/zero, dedupe/open interval/F8 protections; only 1022 policy weights update; all other neural parts exact; reward Adam checkpoint/restart frozen.");
+    }
+    private static String rangeHash(java.nio.file.Path path,long offset,long length) throws Exception {
+        try(var file=java.nio.channels.FileChannel.open(path,java.nio.file.StandardOpenOption.READ)) {
+            var hash=java.security.MessageDigest.getInstance("SHA-256");
+            for(long i=0;i<length;) {
+                int count=(int)Math.min(1<<20,length-i);hash.update(readCheckpointBytes(file,offset+i,count));i+=count;
+            }
+            return java.util.HexFormat.of().formatHex(hash.digest());
+        }
+    }
+    private static void memoryDatabaseThroughJni(java.nio.file.Path parent) throws Exception {
+        var directory=java.nio.file.Files.createDirectories(parent.resolve("memory-checks"));
+        var model=directory.resolve("model.bin");var vectors=java.nio.file.Path.of(model+".vdb");
+        var frozen=directory.resolve("frozen-reference.bin");byte[] memoryFrozenHash=null;
+        long[] data=new long[ActionLayout.DEMO_LONGS],status=new long[24];double[] motion=new double[3];
+        data[0]=991;data[1]=1;data[2]=1;data[ActionLayout.POINTER_MODE_INDEX]=1;
+        long nanos=System.nanoTime(),queries=0,used=0,steps=0;
+        try(var bridge=new NativeCudaBridge(CAPACITY)) {
+            var surfaces=allocate(bridge,96,64);
+            try {
+                waitPhase(bridge,NativeCudaBridge.READY);bridge.checkpoint(model);
+                for(int i=0;i<44;++i){nanos+=20000000;data[8]+=20000000;motion[0]+=.4;submitDemo(bridge,surfaces,data,motion,nanos);}
+                bridge.readLongMemory(status);
+                require(status[7]>0 && status[4]>=20 && status[5]>=20 && status[8]==8192 && status[22]==64 && status[23]==8,
+                        "real GL/JNI visual keys, human annotations and trainable time gates reach external index");
+                data[0]++;data[3]=1;
+                for(int i=0;i<4;++i){nanos+=20000000;submitDemo(bridge,surfaces,data,motion,nanos);}
+                waitSave(bridge);java.nio.file.Files.copy(model,frozen);
+                bridge.readLongMemory(status);steps=status[5];queries=status[1];used=status[7];long memoryFrame=status[0];memoryFrozenHash=fileDigest(vectors);
+                for(int i=0;i<16;++i){nanos+=20000000;submitDemo(bridge,surfaces,data,motion,nanos);}
+                bridge.readLongMemory(status);require(status[0]>memoryFrame&&status[1]==queries&&status[5]==steps&&status[7]==used,
+                        "F8 continues read-only inference/clocks while the memory catalog and gates stay frozen");
+                waitSave(bridge);CheckpointTestSupport.frozen(frozen,model,false);require(java.util.Arrays.equals(memoryFrozenHash,fileDigest(vectors)),"frozen memory database is byte-identical after retrieval and saving");
+                bridge.configureMemory(false);
+                for(int i=0;i<4;++i){nanos+=20000000;submitDemo(bridge,surfaces,data,motion,nanos);}
+                bridge.readLongMemory(status);long pausedQueries=status[1];
+                require(status[10]==0&&status[7]>=used,"off preserves vectors and reports them accurately");
+                for(int i=0;i<4;++i){nanos+=20000000;submitDemo(bridge,surfaces,data,motion,nanos);}
+                bridge.readLongMemory(status);require(status[1]==pausedQueries,"off stops memory retrieval/writes");
+                bridge.configureMemory(true);
+                for(int i=0;i<4;++i){nanos+=20000000;submitDemo(bridge,surfaces,data,motion,nanos);}
+                bridge.readLongMemory(status);require(status[10]==1&&status[11]==1&&status[1]==pausedQueries,"on resumes read-only recall of the frozen library");
+                waitSave(bridge);queries=status[1];used=status[7];
+                try(var file=java.nio.channels.FileChannel.open(vectors,java.nio.file.StandardOpenOption.READ)) {
+                    var header=readCheckpointBytes(file,0,256);
+                    require(header.getLong(8)==14&&header.getLong(16)==2&&file.size()<4_000_000,"separate bounded vector database format");
+                }
+            } finally {bridge.close();closeSurfaces(surfaces);}
+        }
+        try(var bridge=new NativeCudaBridge(CAPACITY)) {
+            var surfaces=allocate(bridge,96,64);try {
+                waitPhase(bridge,NativeCudaBridge.READY);bridge.checkpoint(model);
+                for(int i=0;i<4;++i){nanos+=20000000;submitDemo(bridge,surfaces,data,motion,nanos);}
+                bridge.readLongMemory(status);require(status[0]>0&&status[1]==queries&&status[7]==used&&status[5]==steps&&status[21]==2,
+                    "fresh CUDA worker restores external vector/time catalog and frozen memory gates");
+                waitSave(bridge);CheckpointTestSupport.frozen(frozen,model,false);require(java.util.Arrays.equals(memoryFrozenHash,fileDigest(vectors)),"frozen memory database is byte-identical after retrieval and saving");
+            } finally {bridge.close();closeSurfaces(surfaces);}
+        }
+        // An unusable external library remains byte-identical; the existing model can still run/save.
+        try(var file=java.nio.channels.FileChannel.open(vectors,java.nio.file.StandardOpenOption.READ,java.nio.file.StandardOpenOption.WRITE)) {
+            var byteValue=readCheckpointBytes(file,300,1);byteValue.put(0,(byte)(byteValue.get(0)^1));file.write(byteValue,300);
+        }
+        byte[] corrupted=fileDigest(vectors);
+        try(var bridge=new NativeCudaBridge(CAPACITY)) {
+            var surfaces=allocate(bridge,96,64);try {
+                waitPhase(bridge,NativeCudaBridge.READY);bridge.checkpoint(model);
+                for(int i=0;i<4;++i){nanos+=20000000;submitDemo(bridge,surfaces,data,motion,nanos);}
+                bridge.readLongMemory(status);require(status[21]==-1&&status[10]==0&&bridge.longMemoryMessage().contains("retained"),
+                        "bad library disables only retrieval and exposes the actual persistence error");
+                waitSave(bridge);require(java.util.Arrays.equals(corrupted,fileDigest(vectors)),"a save never overwrites a rejected vector file");
+            } finally {bridge.close();closeSurfaces(surfaces);}
+        }
+        System.out.println("PASS: actual GPU/JNI external vector keys/labels/gate learning, F8 neural and complete memory database freeze with read-only recall, on/off retention, v13+separate-v14 restart and corrupt-store preservation.");
+    }
+
 }
-
-

@@ -8,6 +8,7 @@ public final class VabpnnClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         CaptureController.initialize();
+        VabpnnMod.LOGGER.info("VABPnn {}: GPU PNN -> JEPA -> Transformer action decoder", VabpnnMod.VERSION);
         VabpnnMod.LOGGER.info("VABPnn client initialized.");
     }
 }

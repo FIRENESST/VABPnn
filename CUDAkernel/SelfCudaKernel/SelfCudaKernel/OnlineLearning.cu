@@ -1,6 +1,8 @@
 #include "OnlineLearning.h"
 #include "FrameOperator.h"
 #include "SpikeConnections.h"
+#include "LongTermMemory.h"
+#include "FullSelfLearning.h"
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -83,8 +85,57 @@ __device__ float wheelFeature(const DecisionOutput* out,int d) {
     return d<DecisionWidth ? out->kFeatures[d]:
         d<DecisionWidth+VoteCount ? out->normalizedVotes[d-DecisionWidth]:1.0f;
 }
+// Supervision is attached to the previous completed observation. It trains the
+// decoder with action BCE, learned threshold calibration and categorical k loss.
+__global__ void decoderDemoRoots(const DecisionParameters* p, const DecisionOutput* out,
+        const Cache* cache, FullRewardRoots* roots) {
+    if (!cache->policyActive) return;
+    FullRewardRoots grad{};
+    const int targetK=__popc(cache->label);
+    for(int k=0;k<DecisionKChoices;++k)
+        grad.k[k]=out->kProbability[k]-(k==targetK);
+    const float temperature=p->logGateTemperature>20 ? p->logGateTemperature
+        : log1pf(expf(p->logGateTemperature));
+    for(int action=0;action<VoteCount;++action) {
+        const float label=static_cast<float>((cache->label>>action)&1u);
+        const float posterior=out->posterior[action], threshold=out->threshold[action];
+        const float gate=out->softEligibility[action];
+        float posteriorScore=0, gateScore=0;
+        for(int k=0;k<DecisionKChoices;++k) {
+            posteriorScore+=grad.k[k]*p->kWeight[k][DecisionWidth+action];
+            gateScore+=grad.k[k]*p->kWeight[k][DecisionWidth+VoteCount+action];
+        }
+        const float softScore=gateScore*gate*(1-gate)/temperature;
+        grad.evidence[action]=(posterior-label)/VoteCount+(posteriorScore+softScore)*posterior*(1-posterior);
+        grad.prior[action]=grad.evidence[action];
+        grad.threshold[action]=(threshold-(label>.5f ? .25f : .75f))/VoteCount
+            -softScore*threshold*(1-threshold);
+        grad.temperature-=softScore*(posterior-threshold)*sigmoid(p->logGateTemperature)/temperature;
+        for(int d=0;d<DecisionWidth;++d) {
+            float meanScore=0;
+            for(int k=0;k<DecisionKChoices;++k) meanScore+=grad.k[k]*p->kWeight[k][d];
+            grad.hidden[action][d]=grad.evidence[action]*p->logLikelihoodWeight[action][d]
+                +grad.threshold[action]*p->thresholdWeight[action][d]+meanScore/VoteCount;
+        }
+    }
+    *roots=grad;
+}
+__global__ void trainDecoderBody(DecisionParameters* parameters, Persistent* optimizer,
+        const Cache* cache, const float* gradient) {
+    const int at=blockIdx.x*blockDim.x+threadIdx.x;
+    constexpr int headStart=offsetof(DecisionParameters,logLikelihoodWeight)/sizeof(float);
+    constexpr int priorStart=offsetof(DecisionParameters,initialPriorLogit)/sizeof(float);
+    if (!cache->policyActive || at==0 || at>=FullDecisionParameters
+            || (at>=headStart && at<priorStart) || !isfinite(gradient[at])) return;
+    // Every genuine demonstration runs this group once. Scorer has separate moments.
+    const float step=static_cast<float>(optimizer->output.examples);
+    const float bias1=1-powf(.9f,step),bias2=1-powf(.999f,step);
+    adam(reinterpret_cast<float*>(parameters)+at,reinterpret_cast<float*>(&optimizer->first)+at,
+        reinterpret_cast<float*>(&optimizer->second)+at,gradient[at],bias1,bias2,true);
+}
 __global__ void trainPolicy(DecisionParameters* p, DecisionPositionAdapter* position,
-                            const DecisionOutput* out, Cache* c, Persistent* state) {
+                            const DecisionOutput* out, Cache* c, Persistent* state,
+                            const FullRewardRoots* decoderRoots) {
     if (!c->policyActive || !out->valid || out->frameId!=c->frame) return;
     // Each thread updates distinct parameters. All gradients and the old wheel
     // prediction are computed before any parameter is written.
@@ -100,6 +151,10 @@ __global__ void trainPolicy(DecisionParameters* p, DecisionPositionAdapter* posi
         const float prob=fminf(1-1e-6f,fmaxf(1e-6f,out->posterior[tid]));
         evidence[tid]=(prob-y)/VoteCount;
         threshold[tid]=(out->threshold[tid]-(y ? 0.25f:0.75f))/VoteCount;
+        if(decoderRoots) {
+            evidence[tid]=decoderRoots->evidence[tid];
+            threshold[tid]=decoderRoots->threshold[tid];
+        }
     }
     if(tid==0) {
         // Migrated unused k slots cannot override an old policy before genuine supervision.
@@ -203,18 +258,18 @@ __global__ void finishCache(Cache* c, const DemoSample* sample, std::uint64_t na
     c->previous=*sample; c->nanos=nanos; c->frame=frame; c->ready=1;
 }
 __global__ void configureInference(const DemoSample* sample, JepaConfig* config) {
-    config->motionEnabled=sample->active && sample->modelControl;
+    // Frozen prediction remains available without focus; Java gates actual input delivery.
+    config->motionEnabled=sample->modelControl;
 }
 __global__ void wheelInference(const Persistent* state, const DemoSample* sample,
                                const std::int32_t* votes, const DecisionOutput* previous,
-                               const JepaOutput* jepa, MotionProposal* proposal) {
+                               const JepaOutput* jepa, MotionProposal* proposal,float* features) {
     proposal->wheelSteps=0;
     if (!sample->active || !sample->modelControl || !jepa->pairReady) return;
-    float z=state->wheel[WheelFeatures-1];
+    float z=state->wheel[WheelFeatures-1];features[WheelFeatures-1]=1;
     // Use the previous graph context: never an output from a not-yet-launched current decision.
-    for(int d=0;d<DecisionWidth;++d) z+=state->wheel[d]*previous->kFeatures[d];
-    for(int k=0;k<VoteCount;++k)
-        z+=state->wheel[DecisionWidth+k]*(static_cast<float>(votes[k])/NeuronCount);
+    for(int d=0;d<DecisionWidth;++d){features[d]=previous->kFeatures[d];z+=state->wheel[d]*features[d];}
+    for(int k=0;k<VoteCount;++k){features[DecisionWidth+k]=static_cast<float>(votes[k])/NeuronCount;z+=state->wheel[DecisionWidth+k]*features[DecisionWidth+k];}
     const float delta=tanhf(z)*20.0f*fminf(0.1f,jepa->deltaSeconds);
     proposal->wheelSteps=isfinite(delta)?delta:0;
 }
@@ -225,6 +280,10 @@ struct VabpnnOnlineModel {
     Persistent* persistent=nullptr;
     float* master=nullptr;
     unsigned char* pixels=nullptr;
+    float* wheelFeatures=nullptr;
+    FullRewardRoots* decoderRoots=nullptr;
+    float* decoderGradient=nullptr;
+    void* decoderScratch=nullptr;
     int width=0,height=0;
     cudaEvent_t initialized=nullptr;
 };
@@ -236,6 +295,11 @@ VabpnnOnlineModel* vabpnnCreateOnlineModel(cudaStream_t stream) {
         check(cudaMalloc(reinterpret_cast<void**>(&m->persistent),sizeof(Persistent)),"allocate online optimizer");
         check(cudaMalloc(reinterpret_cast<void**>(&m->master),ParameterCount*sizeof(float)),"allocate latent ternary weights");
         check(cudaMalloc(reinterpret_cast<void**>(&m->pixels),NeuronCount*3),"allocate prior observation on GPU");
+        check(cudaMalloc(reinterpret_cast<void**>(&m->wheelFeatures),WheelFeatures*sizeof(float)),"allocate wheel eligibility");
+        check(cudaMalloc(reinterpret_cast<void**>(&m->decoderRoots),sizeof(FullRewardRoots)),"allocate decoder supervision");
+        check(cudaMalloc(reinterpret_cast<void**>(&m->decoderGradient),FullDecisionParameters*sizeof(float)),"allocate decoder gradient");
+        check(cudaMalloc(&m->decoderScratch,vabpnnSecondsScratchBytes()),"allocate decoder backward workspace");
+        check(cudaMemsetAsync(m->wheelFeatures,0,WheelFeatures*sizeof(float),stream),"zero wheel eligibility");
         check(cudaMemsetAsync(m->sample,0,sizeof(DemoSample),stream),"zero real input");
         check(cudaMemsetAsync(m->cache,0,sizeof(Cache),stream),"zero teaching cache");
         check(cudaMemsetAsync(m->persistent,0,sizeof(Persistent),stream),"zero online optimizer");
@@ -253,11 +317,16 @@ void vabpnnDestroyOnlineModel(VabpnnOnlineModel* m) noexcept {
     if(m->persistent) cudaFree(m->persistent);
     if(m->master) cudaFree(m->master);
     if(m->pixels) cudaFree(m->pixels);
+    if(m->wheelFeatures)cudaFree(m->wheelFeatures);
+    if(m->decoderRoots)cudaFree(m->decoderRoots);
+    if(m->decoderGradient)cudaFree(m->decoderGradient);
+    if(m->decoderScratch)cudaFree(m->decoderScratch);
     if(m->initialized) cudaEventDestroy(m->initialized);
     delete m;
 }
 std::uint64_t vabpnnOnlineModelBytes(const VabpnnOnlineModel* m) noexcept {
-    return m ? sizeof(DemoSample)+sizeof(Cache)+sizeof(Persistent)+ParameterCount*sizeof(float)+NeuronCount*3 : 0;
+    return m ? sizeof(DemoSample)+sizeof(Cache)+sizeof(Persistent)+ParameterCount*sizeof(float)+NeuronCount*3
+        +WheelFeatures*sizeof(float)+sizeof(FullRewardRoots)+FullDecisionParameters*sizeof(float)+vabpnnSecondsScratchBytes() : 0;
 }
 const vabpnn::OnlineOutput* vabpnnOnlineOutput(const VabpnnOnlineModel* m) { return &m->persistent->output; }
 const vabpnn::DemoSample* vabpnnOnlineDemoSample(const VabpnnOnlineModel* m) { return m ? m->sample:nullptr; }
@@ -268,7 +337,7 @@ void vabpnnSetDemoSample(VabpnnOnlineModel* m,const vabpnn::DemoSample* sample,c
 void vabpnnLearnPreviousDemo(const VabpnnGpuFrame& frame) {
     auto* m=frame.onlineModel;
     if(!m || !frame.jepaModel || !frame.decisionModel || !frame.neuronModel) return;
-    if(frame.evaluationMode) {
+    if(frame.evaluationMode || frame.selfLearning) {
         // Inference permissions must still update; no feedback, optimizer, mutation or cache write.
         configureInference<<<1,1,0,frame.stream>>>(m->sample,vabpnnMutableJepaConfig(frame.jepaModel,frame.stream));
         vabpnnPrepareBlockControllers(frame);
@@ -284,11 +353,23 @@ void vabpnnLearnPreviousDemo(const VabpnnGpuFrame& frame) {
     vabpnnLearnBlockControllers(frame,&m->cache->policyActive,&m->cache->label);
     // Generate controls BEFORE pixel learning: its learning-rate output affects the observation later scored.
     vabpnnPrepareBlockControllers(frame);
+    if(frame.longMemory)vabpnnTrainLongMemory(frame.longMemory,
+        vabpnnDecisionModelView(frame.decisionModel).parameters,&m->cache->frame,
+        &m->cache->policyActive,&m->cache->label,frame.longMemoryContext,frame.stream);
     vabpnnTrainBayesianMotion(frame.decisionModel,&m->cache->motionActive,&m->cache->rateX,&m->cache->rateY,frame.stream);
     vabpnnTrainMinuteDecision(frame.decisionModel,&m->cache->policyActive,&m->cache->label,frame.stream);
-    trainPolicy<<<1,256,0,frame.stream>>>(vabpnnMutableDecisionParameters(frame.decisionModel,frame.stream),
-        vabpnnMutablePositionAdapter(frame.decisionModel,frame.stream),
-        vabpnnDecisionModelView(frame.decisionModel).output,m->cache,m->persistent);
+    auto* parameters=vabpnnMutableDecisionParameters(frame.decisionModel,frame.stream);
+    const auto decision=vabpnnDecisionModelView(frame.decisionModel);
+    if(frame.pnnJepa) {
+        decoderDemoRoots<<<1,1,0,frame.stream>>>(parameters,decision.output,m->cache,m->decoderRoots);
+        vabpnnSecondsRewardScore(frame.decisionModel,m->decoderRoots,m->decoderGradient,nullptr,
+            m->decoderScratch,frame.stream,nullptr,&m->cache->policyActive);
+    }
+    trainPolicy<<<1,256,0,frame.stream>>>(parameters,vabpnnMutablePositionAdapter(frame.decisionModel,frame.stream),
+        decision.output,m->cache,m->persistent,frame.pnnJepa ? m->decoderRoots : nullptr);
+    if(frame.pnnJepa)
+        trainDecoderBody<<<(FullDecisionParameters+255)/256,256,0,frame.stream>>>(
+            parameters,m->persistent,m->cache,m->decoderGradient);
     trainPixels<<<(NeuronCount+255)/256,256,0,frame.stream>>>(m->pixels,m->master,
         vabpnnMutableNeuronWeights(frame.neuronModel,frame.stream),m->cache,
         frame.spikeModel ? vabpnnSpikeModelView(frame.spikeModel).blockControls:nullptr);
@@ -303,11 +384,13 @@ void vabpnnCacheDemoObservation(const VabpnnGpuFrame& frame) {
     m->width=frame.width; m->height=frame.height;
     check(cudaGetLastError(),"cache prior pixels only in GPU memory");
 }
-void vabpnnOnlineWheel(const VabpnnGpuFrame& frame,vabpnn::MotionProposal* proposal) {
+void vabpnnOnlineWheel(const VabpnnGpuFrame& frame, vabpnn::MotionProposal* proposal,
+                       const std::int32_t* actionVotes) {
     auto* m=frame.onlineModel;
     wheelInference<<<1,1,0,frame.stream>>>(m->persistent,m->sample,
-        vabpnnNeuronModelView(frame.neuronModel).output,vabpnnDecisionModelView(frame.decisionModel).output,
-        vabpnnJepaModelView(frame.jepaModel).output,proposal);
+        actionVotes ? actionVotes : vabpnnNeuronModelView(frame.neuronModel).output,
+        vabpnnDecisionModelView(frame.decisionModel).output,
+        vabpnnJepaModelView(frame.jepaModel).output,proposal,m->wheelFeatures);
     check(cudaGetLastError(),"infer wheel displacement");
 }
 void vabpnnResetOnlineHistory(VabpnnOnlineModel* m,cudaStream_t stream) {
@@ -319,3 +402,8 @@ std::size_t vabpnnOnlineCheckpointParts(VabpnnOnlineModel* m,vabpnn::ModelPart* 
     parts[1]={m->persistent,sizeof(Persistent)};
     return 2;
 }
+
+float* vabpnnOnlineMasterWeights(VabpnnOnlineModel* model){return model->master;}
+vabpnn::OnlinePersistent* vabpnnOnlinePersistent(VabpnnOnlineModel* model){return model->persistent;}
+
+const float* vabpnnOnlineWheelFeatures(VabpnnOnlineModel* model){return model->wheelFeatures;}

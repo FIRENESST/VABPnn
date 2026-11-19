@@ -50,6 +50,22 @@ final class MouseMotionTrackerTest {
         sample=tracker.sample(resumed+20*MouseMotionTracker.SAMPLE_NANOS,true);
         require(sample.humanDx()==7 && sample.humanDy()==-8,"slow rendering publishes current totals without replaying intervals");
         require(tracker.sample(sample.nanos()+1,true)==sample,"no catch-up publication burst");
+        var rawTracker=new MouseMotionTracker();long stamp=4_000_000_000L;rawTracker.sample(stamp,true);
+        var blocked=command(100,stamp,0,0,0);long[] diagnostic=new long[17];
+        diagnostic[0]=100;diagnostic[1]=stamp;diagnostic[2]=diagnostic[3]=diagnostic[4]=1;
+        diagnostic[5]=Float.floatToRawIntBits(6.25f);diagnostic[6]=Float.floatToRawIntBits(-3.5f);
+        diagnostic[11]=Float.floatToRawIntBits(.2f);diagnostic[12]=Float.floatToRawIntBits(.18f);
+        diagnostic[13]=Float.floatToRawIntBits(.63f);diagnostic[14]=Float.floatToRawIntBits(.62f);
+        rawTracker.prediction(blocked,stamp);rawTracker.suggestion(diagnostic,blocked,stamp);
+        var advised=rawTracker.sample(stamp+MouseMotionTracker.SAMPLE_NANOS,true);
+        require(advised.suggestion().dx()==6.25 && advised.suggestion().dy()==-3.5
+            && advised.predictedDx()==0 && advised.executedDx()==0,"blocked command keeps nonzero advice separately observable");
+        require(advised.suggestion().eligible()==0 && advised.suggestion().axis(32).equals("未过阈值"),"axis blocking reason is explicit");
+        diagnostic[0]=101;rawTracker.suggestion(diagnostic,blocked,stamp);
+        require(rawTracker.needsSuggestion(101),"different frame diagnostics never mix with the command");
+        rawTracker.reset();rawTracker.sample(stamp+2*MouseMotionTracker.SAMPLE_NANOS,true);
+        diagnostic[0]=100;rawTracker.suggestion(diagnostic,blocked,stamp+2*MouseMotionTracker.SAMPLE_NANOS);
+        require(rawTracker.sample(stamp+3*MouseMotionTracker.SAMPLE_NANOS,true).suggestion().frame()==0,"reset never replays old raw advice");
         System.out.println("PASS: mouse delta accumulation, 30 Hz limit, command deduplication, axis gates, GUI execution values, idle/pause/resume/stale and invalid input.");
     }
 }

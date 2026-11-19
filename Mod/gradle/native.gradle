@@ -52,3 +52,20 @@ tasks.register("nativeBenchmark", Exec) {
         "-File", file("native/build-native.ps1").absolutePath, "-Benchmark",
         "-OperatorRoot", cudaOperatorDir.absolutePath)
 }
+
+// Same full-resolution production operators, including the bounded reward policy/cache.
+tasks.register("nativeRewardBenchmark", Exec) {
+    group = "verification"
+    description = "Measure full seconds/minutes, topology/meme/scope and 512-receipt reward stress."
+    commandLine("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", file("native/build-native.ps1").absolutePath, "-TestOnly", "-Benchmark", "-BenchmarkSelfTraining",
+        "-OperatorRoot", cudaOperatorDir.absolutePath)
+}
+
+tasks.register("nativeMemoryTest", Exec) {
+    group = "verification"
+    description = "Run external memory retrieval/time/freeze/persistence and numerical gate checks."
+    commandLine("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", file("native/build-native.ps1").absolutePath, "-TestOnly", "-TestOperator", "-TestPattern", "long_memory*_test.cu",
+        "-OperatorRoot", cudaOperatorDir.absolutePath)
+}

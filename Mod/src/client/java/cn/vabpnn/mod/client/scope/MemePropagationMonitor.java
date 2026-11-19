@@ -74,7 +74,7 @@ public final class MemePropagationMonitor implements AutoCloseable {
     private void createWindow() {
         if(GraphicsEnvironment.isHeadless()) throw new IllegalStateException("desktop display unavailable");
         panel=new MemePropagationPanel(latest,status,tile);
-        window=new JFrame("VABPnn 1.4.1 · 模因传播  |  5 Hz  |  F6 显示 / 隐藏");
+        window=new JFrame("VABPnn · 模因传播  |  5 Hz  |  F7 显示 / 隐藏");
         window.setDefaultCloseOperation(JFrame.HIDE_ON_CLOSE);
         window.setAutoRequestFocus(false);
         window.setContentPane(panel);

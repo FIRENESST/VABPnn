@@ -1,0 +1,1 @@
+{"required":true,"package":"cn.vabpnn.telemetry.mixin","compatibilityLevel":"JAVA_25","mixins":["BlockItemMixin","MiningMixin","ItemEntityMixin"],"injectors":{"defaultRequire":1}}

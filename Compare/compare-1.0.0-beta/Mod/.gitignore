@@ -1,0 +1,23 @@
+# Gradle / IDE build files
+.gradle/
+build/
+# Native build scripts are source files; keep generated output under /build.
+!/native/build/
+!/native/build/*.ps1
+out/
+.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+
+# Development Minecraft instances, including worlds
+run/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

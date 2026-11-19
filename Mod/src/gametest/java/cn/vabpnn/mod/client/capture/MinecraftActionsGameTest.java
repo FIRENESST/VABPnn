@@ -35,6 +35,12 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
         });
     }
     @Override public void runTest(ClientGameTestContext context) {
+        if(Boolean.getBoolean("vabpnn.test.mouseOnly")) {
+            try{MinecraftMouseChecks.run(context);}catch(Exception error){throw new AssertionError(error);}return;
+        }
+        if(Boolean.getBoolean("vabpnn.test.rewardOnly")) {
+            try{MinecraftRewardChecks.run(context);}catch(Exception error){throw new AssertionError(error);}return;
+        }
         try(var world=context.worldBuilder().create()) {
             world.getClientLevel().waitForChunksDownload();
             world.getServer().runCommand("gamemode survival @p");
@@ -50,6 +56,7 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
                 require(!CaptureController.inputState().modelControl(),"startup remains demonstration mode");
             });
             MinecraftFeedbackChecks.verify(context);
+            MinecraftMemoryChecks.verifyCommands(context);
             verifyPlayerPosition(context);
             // A live GPU packet must reach this world's production controller, not just a fake sink.
             long positionSteps=context.computeOnClient(client -> CaptureController.positionState().positionSteps());
@@ -60,11 +67,12 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
                     && CaptureController.inputState().frame()>0
                     && CaptureController.inputState().appliedCommands()>0,600);
             MinecraftFeedbackChecks.verifyContinuousModel(context);
-            hotkey(context,GLFW.GLFW_KEY_F6);
+            hotkey(context,GLFW.GLFW_KEY_F7);
             context.waitFor(client -> CaptureController.memeWindowVisible() && CaptureController.memeWindowFrame()>0,200);
             var frozen=context.computeOnClient(client -> CaptureController.feedbackState(true));
             long coordinateUpdates=context.computeOnClient(client -> CaptureController.positionState().positionSteps());
             var frozenTime=context.computeOnClient(client -> CaptureController.temporalState());
+            var frozenMemory=MinecraftMemoryChecks.freezeBaseline(context);
             context.waitTicks(24);
             context.runOnClient(client -> {
                 var evaluated=CaptureController.feedbackState(true);
@@ -78,7 +86,8 @@ public final class MinecraftActionsGameTest implements FabricClientGameTest {
                         && CaptureController.temporalState().bayesianMotionSteps()==frozenTime.bayesianMotionSteps(),
                         "F8 evaluation freezes all published training counters including JEPA and coordinates");
             });
-            hotkey(context,GLFW.GLFW_KEY_F6);
+            MinecraftMemoryChecks.verifyFrozen(context,frozenMemory);
+            hotkey(context,GLFW.GLFW_KEY_F7);
             VabpnnMod.LOGGER.info("PASS: F8 frozen evaluation continues actual GPU/model operation without training, including the independent meme viewer.");
             MinecraftFeedbackChecks.verifyPredictionOnly(context);
             // Feed deterministic nonempty packets through the SAME production controller as JNI.

@@ -148,14 +148,14 @@ public final class ScopePanel extends JPanel {
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
         header(g); overview(g); local(g); history(g); actions(g); mouseMotion(g); hierarchy(g); memes(g); learning(g);
         g.setFont(SMALL);
-        text(g,"F7 显示/隐藏  ·  F8 切换控制  ·  F9 暂停  ·  F10 保存",24,LOGICAL_HEIGHT-9,MUTED);
+        text(g,"F7 显示/隐藏  ·  F8 切换控制  ·  F9 暂停  ·  自动保存",24,LOGICAL_HEIGHT-9,MUTED);
         text(g,"GPU 状态采样 10 Hz  ·  窗口 "+fmt("%.0f",fps)+(fps>0 ? " fps":" 待计时"),460,LOGICAL_HEIGHT-9,MUTED);
         g.dispose();
     }
     private void header(Graphics2D g) {
         panel(g,12,12,744,76); g.setFont(TITLE); text(g,"VABPnn  ·  脉冲网络",24,42,TEXT);
         var state=status.get();
-        String label=state==null ? "等待数据":!state.capturing() ? "采集暂停":state.predictionOnly() ? "仅预测：权重冻结 · 连接动态":state.modelControl() ? "连续控制：权重冻结 · 连接动态":"人工示范";
+        String label=state==null ? "等待数据":!state.capturing() ? "采集暂停":state.predictionOnly() ? "仅预测：权重冻结 · 连接动态":state.fullLearning() ? "全网络自学习 · 连接动态":state.modelControl() ? "连续控制：权重冻结 · 连接动态":"人工示范";
         Color color=state!=null && state.capturing() ? GREEN:AMBER;
         if(shown==null) { label="等待 GPU 数据"; color=AMBER; }
         else if(!shown.valid()) { label="数据无效"; color=PINK; }
@@ -261,7 +261,7 @@ public final class ScopePanel extends JPanel {
         boolean executing=state!=null && state.capturing() && state.modelControl() && state.inputActive()
             && state.appliedFrame()>0;
         g.setFont(SMALL); text(g,state!=null && state.predictionOnly() ? "仅预测 · 无操作":executing ? "执行包 #"+state.appliedFrame():state!=null && state.modelControl() && state.inputActive() ? "等待有效指令":"仅显示模型建议",585,586,executing ? GREEN:MUTED);
-        text(g,state!=null && (state.modelControl() || state.predictionOnly()) ? "概率       阈值仅参考 · 不拦截行动":"概率       橙线：阈值 · 灰线：先验",126,605,MUTED); text(g,"状态",504,605,MUTED); text(g,"原始票数",632,605,MUTED);
+        text(g,"概率       橙线：阈值 · 灰线：先验",126,605,MUTED); text(g,"状态",504,605,MUTED); text(g,"原始票数",632,605,MUTED);
         for(int k=0;k<ACTIONS;++k) {
             int y=624+k*16;
             float probability=shown==null ? 0:shown.probability(k),threshold=shown==null ? .5f:shown.threshold(k);
@@ -281,17 +281,23 @@ public final class ScopePanel extends JPanel {
         }
     }
     private void mouseMotion(Graphics2D g) {
-        panel(g,12,880,744,116); g.setFont(BODY);
-        text(g,"鼠标位移 · Δx / Δy",24,903,CYAN);
-        var sample=motion.get(); var state=status.get();
-        boolean fresh=sample!=null && sample.fresh(System.nanoTime()) && state!=null
-                && state.capturing() && (state.inputActive() || state.predictionOnly());
+        panel(g,12,880,744,116);
+        var sample=motion.get();var state=status.get();long now=System.nanoTime();
+        boolean fresh=sample!=null && sample.fresh(now) && state!=null
+                && state.capturing() && (state.inputActive() || state.modelControl() || state.predictionOnly());
+        var advice=fresh ? sample.suggestion():MouseMotionTracker.NO_SUGGESTION;
+        boolean raw=advice.fresh(now) && advice.paired();
+        motionRow(g,"门控前建议 / 帧",903,raw ? advice.dx():0,raw ? advice.dy():0,CYAN);
         g.setFont(SMALL);
-        text(g,fresh ? fmt("最近 %.1f ms 累计 · 原始输入单位",sample.intervalNanos()/1e6)
-                : "暂停 / 等待输入 · 原始输入单位",406,903,MUTED);
-        motionRow(g,"人工输入",930,fresh ? sample.humanDx():0,fresh ? sample.humanDy():0,CYAN);
-        motionRow(g,"模型指令",953,fresh ? sample.predictedDx():0,fresh ? sample.predictedDy():0,AMBER);
-        motionRow(g,"模型执行",976,fresh && !state.predictionOnly() ? sample.executedDx():0,fresh && !state.predictionOnly() ? sample.executedDy():0,GREEN);
+        String detail=!advice.fresh(now) ? "等待新的位移预测":!advice.paired() ? "等待连续画面配对":
+                fmt("p / 阈值  X %.2f / %.2f %s   ·   Y %.2f / %.2f %s",
+                    advice.probabilityX(),advice.thresholdX(),advice.axis(32),
+                    advice.probabilityY(),advice.thresholdY(),advice.axis(64));
+        text(g,detail,24,919,MUTED);
+        text(g,state!=null && state.predictionOnly() ? "仅预测 · 不执行":fresh ? fmt("指令累计 %.0f ms",sample.intervalNanos()/1e6):"暂停",615,919,MUTED);
+        motionRow(g,"人工输入",938,fresh ? sample.humanDx():0,fresh ? sample.humanDy():0,CYAN);
+        motionRow(g,"门控后指令",961,fresh ? sample.predictedDx():0,fresh ? sample.predictedDy():0,AMBER);
+        motionRow(g,"实际执行",984,fresh && !state.predictionOnly() ? sample.executedDx():0,fresh && !state.predictionOnly() ? sample.executedDy():0,GREEN);
     }
     private static void motionRow(Graphics2D g,String label,int y,double dx,double dy,Color color) {
         g.setFont(BODY); text(g,label,24,y,color);

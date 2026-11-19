@@ -69,7 +69,7 @@ public final class MemePropagationPanel extends JPanel {
             text(g,"VABPnn 1.4.1   /   GPU 观测 · 5 Hz",187,38,14,MUTED);
             boolean running=state.capturing() && sample!=null && !sample.stale(now);
             badge(g,running ? "实时":"等待 / 暂停",1120,18,176,running ? TEAL:GOLD);
-            text(g,state.predictionOnly() ? "仅预测：权重冻结，选点 / 连接动态，不注入操作":state.evaluation() ? "连续控制：权重冻结，选点 / 连接 / 包传播继续":"示范模式：在线学习与模因传播",24,68,14,
+            text(g,state.predictionOnly() ? "仅预测：权重冻结，选点 / 连接动态，不注入操作":state.evaluation() ? "连续控制：权重冻结，选点 / 连接 / 包传播继续":"在线学习与模因传播",24,68,14,
                     state.evaluation() ? BLUE:TEAL);
             text(g,clip(state.note(),40),632,68,14,MUTED);
             card(g,24,88,300,58);card(g,348,88,300,58);card(g,672,88,300,58);card(g,996,88,300,58);
@@ -101,12 +101,12 @@ public final class MemePropagationPanel extends JPanel {
             } else {
                 card(g,768,196,528,680);card(g,24,646,720,230);
                 text(g,sample==null ? "等待第一帧 GPU 数据…":"正在读取所选块 / 当前模式的数据…",794,240,17,MUTED);
-                text(g,"/vabpnn start 后开始取样，F6 开关窗口",794,273,14,MUTED);
+                text(g,"/vabpnn start 后开始取样，F7 开关窗口",794,273,14,MUTED);
             }
             if(sample!=null && (!state.capturing() || sample.stale(now) || !sample.enabled())) {
                 badge(g,!sample.enabled() ? "模因 / 块模型关闭":sample.stale(now) ? "数据已停更":"流程暂停",294,530,250,GOLD);
             }
-            text(g,"F6 开关窗口   ·   关闭窗口停止 GPU 取样   ·   实线：实际最近一跳，虚线：CSR 候选",24,892,12,MUTED);
+            text(g,"F7 开关窗口   ·   关闭窗口停止 GPU 取样   ·   实线：实际最近一跳，虚线：CSR 候选",24,892,12,MUTED);
         } finally { g.dispose(); }
     }
     private void renderMap(Graphics2D g,MemeSnapshot s) {

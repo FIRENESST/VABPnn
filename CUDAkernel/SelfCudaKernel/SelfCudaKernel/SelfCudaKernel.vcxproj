@@ -174,11 +174,20 @@
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="JepaMotion.cu" />
+    <CudaCompile Include="PnnJepa.cu" />
     <ClInclude Include="JepaMotion.h" />
+    <ClInclude Include="PnnJepa.h" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="OnlineLearning.cu" />
+    <CudaCompile Include="FullSelfLearning.cu" />
+    <CudaCompile Include="SecondsLearning.cu" />
+    <CudaCompile Include="RewardPolicy.cu" />
+    <CudaCompile Include="LongTermMemory.cu" />
     <ClInclude Include="OnlineLearning.h" />
+    <ClInclude Include="FullSelfLearning.h" />
+    <ClInclude Include="RewardPolicy.h" />
+    <ClInclude Include="LongTermMemory.h" />
     <ClInclude Include="ModelSnapshot.h" />
   </ItemGroup>
   <ItemGroup>

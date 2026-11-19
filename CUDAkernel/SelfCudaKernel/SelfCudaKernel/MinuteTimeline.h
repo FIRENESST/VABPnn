@@ -5,6 +5,8 @@
 #include <cstddef>
 
 struct VabpnnMinuteModel;
+struct VabpnnDecisionModel;
+namespace vabpnn {struct FullRewardRoots;}
 namespace vabpnn {
 constexpr int MinuteHistory = 8; // Current observed minute and up to seven previous minutes.
 constexpr int MinuteWidth = 8, MinuteHeads = 2, MinuteHeadWidth = MinuteWidth / MinuteHeads;

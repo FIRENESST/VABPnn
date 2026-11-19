@@ -1,4 +1,5 @@
 #include "TemporalDecision.h"
+#include "FullSelfLearning.h"
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,7 @@ struct MinuteCache {
     float attention[VoteCount][MinuteHeads][MinuteTokens], context[VoteCount][MinuteWidth];
     float time[MinuteHistory][MinuteTimeFeatures], currentTime[MinuteTimeFeatures];
     int learningFrozen;
+    float observationAlpha;
 };
 struct MinuteBackward {
     float gradient[MinuteParameterCount];
@@ -82,7 +84,7 @@ __global__ void minuteForward(const std::int32_t* votes,const DecisionMinutePers
         // Duration weighting caps unseen time at .25 s; identical timestamps add no samples.
         const float weight=fresh ? 1.0f/30.0f:fminf(.25f,dt);
         const float total=state->coverageSeconds[slot]+weight;
-        alpha=total>0 ? weight/total:0;
+        alpha=total>0 ? weight/total:0;cache->observationAlpha=alpha;
         state->coverageSeconds[slot]=total;state->sampleNanos[slot]=nanos;
         state->started=1;state->lastNanos=nanos;count=state->count;
         cache->learningFrozen=frozen;
@@ -183,10 +185,10 @@ __global__ void minuteForward(const std::int32_t* votes,const DecisionMinutePers
 // is differentiated, as well as both minute heads and the entire minute attention.
 __global__ void minuteBackward(const DecisionMinutePersistent* persistent,const MinuteCache* c,
         const DecisionParameters* base,const DecisionOutput* out,const int* active,const std::uint32_t* label,
-        MinuteBackward* b) {
+        MinuteBackward* b,const FullRewardRoots* reward=nullptr) {
     const int i=threadIdx.x;
-    if(i==0)b->active=*active && !c->learningFrozen && out->valid && c->output.valid
-        && out->frameId==c->output.frameId && __popc(*label)<base->enabledKChoices;
+    if(i==0)b->active=(reward || *active) && !c->learningFrozen && out->valid && c->output.valid
+        && out->frameId==c->output.frameId && (reward || __popc(*label)<base->enabledKChoices);
     __syncthreads();
     if(!b->active)return;
     for(int at=i;at<MinuteParameterCount;at+=blockDim.x)b->gradient[at]=0;
@@ -195,18 +197,18 @@ __global__ void minuteBackward(const DecisionMinutePersistent* persistent,const 
     }
     for(int at=i;at<VoteCount*MinuteWidth;at+=blockDim.x)reinterpret_cast<float*>(b->query)[at]=0;
     const auto& p=persistent->parameters;const int count=c->output.buckets;
-    const int target=__popc(*label);
-    if(i<MinuteKChoices)b->k[i]=out->kProbability[i]-(i==target);
+    const int target=reward ? 0:__popc(*label);
+    if(i<MinuteKChoices)b->k[i]=reward ? reward->k[i]:out->kProbability[i]-(i==target);
     __syncthreads();
     if(i<VoteCount) {
         const float posterior=out->posterior[i];
-        float g=(posterior-static_cast<float>((*label>>i)&1u))/VoteCount;
+        float g=reward ? reward->evidence[i]:(posterior-static_cast<float>((*label>>i)&1u))/VoteCount;
         const float soft=out->softEligibility[i],temperature=softplus(base->logGateTemperature);
         float chain=0;
         for(int k=0;k<MinuteKChoices;++k)
             chain+=b->k[k]*(base->kWeight[k][DecisionWidth+i]
                 +base->kWeight[k][DecisionWidth+VoteCount+i]*soft*(1-soft)/temperature);
-        g+=chain*posterior*(1-posterior);b->evidence[i]=g;
+        if(!reward)g+=chain*posterior*(1-posterior);b->evidence[i]=g;
         for(int d=0;d<MinuteWidth;++d) {
             float hiddenGradient=g*p.evidence[i][d];
             for(int k=0;k<MinuteKChoices;++k)hiddenGradient+=b->k[k]*p.k[k][d]/VoteCount;
@@ -399,4 +401,17 @@ void vabpnnResetMinuteHistory(VabpnnMinuteModel* m,cudaStream_t stream) {
     check(cudaStreamWaitEvent(stream,m->initialized,0),"wait before minute reset");
     check(cudaMemsetAsync(m->state,0,sizeof(MinuteState),stream),"reset minute observations");
     check(cudaMemsetAsync(m->cache,0,sizeof(MinuteCache),stream),"reset minute inference cache");
+}
+
+namespace {
+__global__ void exportMinuteScore(const MinuteBackward* b,const MinuteCache* c,const DecisionMinutePersistent* p,float* gradient,float* votes){
+ for(int i=threadIdx.x;i<MinuteParameterCount;i+=blockDim.x)gradient[i]=b->active ? b->gradient[i]:0;
+ if(threadIdx.x<VoteCount && b->active){int i=threadIdx.x;float g=0;for(int d=0;d<MinuteWidth;++d)g+=(b->current[i][d]+c->observationAlpha*b->input[0][i][d])*p->parameters.voteEmbedding[d];votes[i]+=g;}
+}
+}
+void vabpnnScoreMinuteTimeline(VabpnnMinuteModel* model,const vabpnn::DecisionParameters* p,const vabpnn::DecisionOutput* out,
+    const vabpnn::FullRewardRoots* roots,float* gradient,float* votes,cudaStream_t stream){
+ minuteBackward<<<1,32,0,stream>>>(model->persistent,model->cache,p,out,nullptr,nullptr,model->backward,roots);
+ exportMinuteScore<<<1,64,0,stream>>>(model->backward,model->cache,model->persistent,gradient,votes);
+ check(cudaGetLastError(),"cache exact minute-attention reward eligibility");
 }

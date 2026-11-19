@@ -2,6 +2,7 @@
 #include "OnlineLearning.h"
 #include "SpikeConnections.h"
 #include "MemeState.h"
+#include "PnnJepa.h"
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -61,10 +62,12 @@ void vabpnnLaunchNextStage(const VabpnnGpuFrame& frame) {
     vabpnnClearMotionProposal(frame.decisionModel, frame.stream);
     auto* motion = vabpnnMutableMotionProposal(frame.decisionModel, frame.stream);
     if (frame.jepaModel) vabpnnLaunchJepaForward(frame, votes.output, frame.jepaModel, motion);
-    if (frame.onlineModel) vabpnnOnlineWheel(frame, motion);
+    const auto* actionInput = frame.pnnJepa && frame.jepaModel ? vabpnnJepaDecoderInput(frame.jepaModel) : nullptr;
+    const auto* actionVotes = actionInput ? actionInput->votes : votes.output;
+    if (frame.onlineModel) vabpnnOnlineWheel(frame, motion, actionVotes);
     // WHEEL EXTENSION POINT: queue a later GPU wheel operator here. JEPA writes X/Y only.
     // Mouse movement is enabled only after head training, then gated by actions 6 and 7.
-    vabpnnLaunchTemporalDecision(frame, votes.output, frame.decisionModel);
+    vabpnnLaunchTemporalDecision(frame, actionVotes, frame.decisionModel);
     vabpnnObserveSpikePrediction(frame); // Structural learning also runs with frozen neural weights.
     // GPU probabilities/history remain here. The mod receives only the final 40-byte command.
 }
@@ -78,7 +81,7 @@ void vabpnnLaunchLearningStep(const VabpnnGpuFrame& frame) {
     if (frame.evaluationMode) return; // Includes JEPA AdamW/EMA and observation training caches.
     if (frame.jepaModel && frame.neuronModel)
         vabpnnTrainJepaSelfSupervised(frame.jepaModel, frame.stream);
-    if (frame.onlineModel) vabpnnCacheDemoObservation(frame);
+    if (frame.onlineModel && !frame.selfLearning) vabpnnCacheDemoObservation(frame);
 }
 
 // The mod invokes this once per frame, from its CUDA worker thread.
@@ -133,9 +136,10 @@ int main() {
                     vabpnn::NeuronCount, vabpnn::ParameterCount);
         VabpnnGpuFrame frame{rgba, pitch, rgb, vabpnn::TargetWidth,
                             vabpnn::TargetHeight, 0, 0, stream, model, decision, jepa,nullptr,spike};
+        frame.pnnJepa = true;
         vabpnnLaunchOperator(frame);
         checkCuda(cudaStreamSynchronize(stream), "verify standalone kernel completion");
-        std::puts("PASS: GPU JEPA/AdamW + raw votes -> graph/Markov/Bayes -> threshold/top-k; no image readback.");
+        std::puts("PASS: GPU PNN -> JEPA -> Transformer / Bayes -> atomic actions; no image readback.");
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
         exitCode = 1;

@@ -1,7 +1,7 @@
 // Java/UI/GL/Minecraft fixtures run separately from production packaging.
 tasks.named("runClient", JavaExec) {
-    systemProperty("vabpnn.scope.enabled",providers.gradleProperty("networkScope").getOrElse("true"))
-    systemProperty("vabpnn.memeScope.enabled",providers.gradleProperty("memeScope").getOrElse("true"))
+    systemProperty("vabpnn.scope.enabled",providers.gradleProperty("networkScope").getOrElse("false"))
+    systemProperty("vabpnn.memeScope.enabled",providers.gradleProperty("memeScope").getOrElse("false"))
     systemProperty("vabpnn.cuda.smokeFrames", providers.gradleProperty("gpuSmokeFrames").getOrElse("0"))
     systemProperty("vabpnn.cuda.capacity", providers.systemProperty("vabpnn.cuda.capacity").getOrElse("4"))
 }
@@ -55,4 +55,28 @@ tasks.register("memeScopeUiSmokeTest",JavaExec) {
     dependsOn(tasks.named("glSmokeTestClasses"))
     classpath=sourceSets.glSmokeTest.runtimeClasspath
     mainClass="cn.vabpnn.mod.client.scope.MemeWindowRenderTest"
+}
+
+def scorerTestJar=providers.gradleProperty("scorerTelemetryJar")
+if(scorerTestJar.isPresent()){dependencies{runtimeOnly files(scorerTestJar.get())}}
+sourceSets.gametest.compileClasspath += sourceSets.glSmokeTest.output.classesDirs
+sourceSets.gametest.runtimeClasspath += sourceSets.glSmokeTest.output.classesDirs
+tasks.named("compileGametestJava"){dependsOn(tasks.named("glSmokeTestClasses"))}
+tasks.named("runClientGameTest",JavaExec){
+    if(providers.gradleProperty("rewardGameTest").isPresent())systemProperty("vabpnn.test.rewardOnly","true")
+    if(providers.gradleProperty("rewardFixture").isPresent())systemProperty("vabpnn.model.path",providers.gradleProperty("rewardFixture").get())
+    if(providers.gradleProperty("scorerTestEndpoint").isPresent()){
+        systemProperty("vabpnn.scorer.endpoint",providers.gradleProperty("scorerTestEndpoint").get())
+        systemProperty("vabpnn.scorer.url",providers.gradleProperty("scorerTestEndpoint").get())
+    }
+}
+
+tasks.register("mouseFixture",JavaExec){
+    dependsOn(tasks.named("glSmokeTestClasses"))
+    classpath=sourceSets.glSmokeTest.runtimeClasspath
+    mainClass="cn.vabpnn.mod.client.capture.MouseFixtureBuilder"
+    args(providers.gradleProperty("mouseFixtureSource").getOrElse(""),providers.gradleProperty("mouseFixtureTarget").getOrElse(""))
+}
+tasks.named("runClientGameTest",JavaExec){
+    if(providers.gradleProperty("mouseGameTest").isPresent())systemProperty("vabpnn.test.mouseOnly","true")
 }

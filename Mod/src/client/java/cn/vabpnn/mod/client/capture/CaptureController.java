@@ -24,7 +24,7 @@ import static org.lwjgl.opengl.GL33C.*;
 
 /** Continuous GL -> CUDA device queue -> GPU operator. Does not read or save frames. */
 public final class CaptureController {
-    private static KeyMapping continuousKey, controlKey, saveKey, scopeKey, memeScopeKey;
+    private static KeyMapping continuousKey, controlKey, scopeKey;
     private static NetworkMonitor monitor;
     private static final MouseMotionTracker mouseMotion=new MouseMotionTracker();
     private static final long[] scopeMeta=new long[ScopeSnapshot.META];
@@ -43,7 +43,7 @@ public final class CaptureController {
     private static final PlayerPositionSampler playerPosition=new PlayerPositionSampler();
     private static final long[] positionStatus=new long[7];
     private static final long[] blockStatus=new long[14];
-    private static int requestedBlocks=-1,requestedBlockMode=-1,requestedMemes=-1;
+    private static int requestedBlocks=1,requestedBlockMode=1,requestedMemes=1;
     private static final long[] memeStatus=new long[12];
     public record MemeState(long observations,long samples,long updates,long propagations,long receipts,
                             long longSelections,long dispatches,boolean enabled,long localActive,
@@ -72,7 +72,11 @@ public final class CaptureController {
     private static final boolean[] physicalKeys = new boolean[ActionLayout.PHYSICAL_KEYS.length];
     private static final int[] demoKeyCodes = ActionLayout.PHYSICAL_KEYS;
     private static boolean modelControl, predictionOnly, inputActive;
-    private static boolean learningFrozen() { return modelControl || predictionOnly; }
+    private static final SelfTrainingController selfTraining=new SelfTrainingController();
+    private static final MemoryContextSampler memoryContext=new MemoryContextSampler();
+    private static final long[] longMemoryStatus=new long[24];
+    private static int requestedMemory=1;
+    private static boolean learningFrozen() { return predictionOnly || modelControl && !selfTraining.fullLearning(); }
     private static int syntheticDepth;
     private static int lastCheckpointStatus;
     private static final long[] saveStatus=new long[3], decisionStatus=new long[7], timeStatus=new long[5];
@@ -83,17 +87,20 @@ public final class CaptureController {
     private static NativeCudaBridge bridge;
     private static final ActionExecutor actions = new ActionExecutor();
     private static final long[] controlCommand = new long[7], predictionCommand=new long[7];
+    private static final long[] mousePredictionData=new long[17];
     private static MinecraftInputSink inputSink;
-    private static Object actionScene, actionScreen;
+    private static Object actionScene, actionScreen, actionPlayer;
     private static boolean actionMouseGrabbed, controlAllowed;
+    private static double deliveredDx,deliveredDy,deliveredWheel;
     public record InputState(boolean modelControl,boolean capturing,boolean allowed,long frame,
-                             int selectedMask,int heldKeys,int heldButtons,long appliedCommands,boolean predictionOnly) {
-        public boolean learningFrozen() { return modelControl || predictionOnly; }
+                             int selectedMask,int heldKeys,int heldButtons,long appliedCommands,boolean predictionOnly,boolean fullLearning) {
+        public InputState(boolean modelControl,boolean capturing,boolean allowed,long frame,int selectedMask,int heldKeys,int heldButtons,long appliedCommands,boolean predictionOnly){this(modelControl,capturing,allowed,frame,selectedMask,heldKeys,heldButtons,appliedCommands,predictionOnly,false);}
+        public boolean learningFrozen() { return predictionOnly || modelControl && !fullLearning; }
     }
     /** Read on the Minecraft thread; consumers may publish this immutable snapshot. */
     public static InputState inputState() {
         return new InputState(modelControl,started && enabled && !failed && !closed,controlAllowed,actions.appliedFrame(),
-                actions.appliedMask(),actions.heldKeys(),actions.heldButtons(),actions.appliedCommands(),predictionOnly);
+                actions.appliedMask(),actions.heldKeys(),actions.heldButtons(),actions.appliedCommands(),predictionOnly,selfTraining.fullLearning());
     }
     public record PredictionState(long frame,int selectedMask,float dx,float dy,float wheel,boolean valid) {}
     static PredictionState predictionState(long now) {
@@ -151,18 +158,14 @@ public final class CaptureController {
                 "key.vabpnn.continuous", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_F9, category));
         controlKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
                 "key.vabpnn.model_control", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_F8, category));
-        saveKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-                "key.vabpnn.save_model", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_F10, category));
         scopeKey=KeyMappingHelper.registerKeyMapping(new KeyMapping(
                 "key.vabpnn.network_scope",InputConstants.Type.KEYSYM,GLFW.GLFW_KEY_F7,category));
-        memeScopeKey=KeyMappingHelper.registerKeyMapping(new KeyMapping(
-                "key.vabpnn.meme_scope",InputConstants.Type.KEYSYM,GLFW.GLFW_KEY_F6,category));
         memeMonitor=new MemePropagationMonitor(message -> VabpnnMod.LOGGER.warn(message));
         monitor=new NetworkMonitor(message -> VabpnnMod.LOGGER.warn(message));
         monitor.status(false,false,false,"待命：/vabpnn start");
         VabpnnMod.LOGGER.info("Network scope is deferred until /vabpnn start; F7 then toggles visibility.");
         capacity = Math.max(3, Math.min(5, Integer.getInteger("vabpnn.cuda.capacity", 4)));
-        VabpnnMod.LOGGER.info("Human demonstration training; F8 freezes neural weights and continuously controls without the confidence gate; salience/topology remain dynamic.");
+        VabpnnMod.LOGGER.info("Human demonstration training; F8 freezes neural weights and continuously controls with the learned confidence gate; salience/topology remain dynamic.");
         VabpnnMod.LOGGER.info("Waiting for /vabpnn start: {} slots configured; no GPU pipeline is allocated before starting.", capacity);
     }
 
@@ -176,19 +179,67 @@ public final class CaptureController {
         if(started && enabled && !failed) return onlyPredict ? setPredictionOnly(true):"already_started";
         boolean fresh=!started;
         started=true; enabled=true; failed=false;
+        if(fresh) {
+            selfTraining.disable("pipeline_started");
+            configureBlocks(1,1);configureMemes(1);configureLongMemory(true);
+        }
         if(fresh || onlyPredict) { modelControl=false;predictionOnly=onlyPredict; }
         resetInputEpoch();
         nextLog=0; nextFeedbackRead=0;
         if(fresh && monitor!=null)
-            monitor.show(Boolean.parseBoolean(System.getProperty("vabpnn.scope.enabled","true")));
+            monitor.show(Boolean.parseBoolean(System.getProperty("vabpnn.scope.enabled","false")));
         if(fresh && memeMonitor!=null)
-            memeMonitor.show(Boolean.parseBoolean(System.getProperty("vabpnn.memeScope.enabled","true")));
+            memeMonitor.show(Boolean.parseBoolean(System.getProperty("vabpnn.memeScope.enabled","false")));
         refreshMonitor("启动中");
         return onlyPredict ? "predict_started":fresh ? "started":"resumed";
     }
     /** Mode change releases owned input now; the existing frame fence excludes queued old commands. */
+    static String longMemoryText(){
+        if(bridge==null)return "长期记忆：待命";
+        bridge.readLongMemory(longMemoryStatus);var s=longMemoryStatus;
+        return String.format(java.util.Locale.ROOT,"长期记忆 %s · %d/8192 · top-8 命中 %d · 示范 %d / 门控训练 %d · 秒 %.2f / 分钟 %.3f · 年龄 %.2fs / %.2fmin · 读/写/保留 %.3f/%.3f/%.3f · %s",
+            s[10]==1 ? "开启":"关闭",s[7],s[3],s[4],s[5],Float.intBitsToFloat((int)s[12]),Float.intBitsToFloat((int)s[13]),
+            Float.intBitsToFloat((int)s[14]),Float.intBitsToFloat((int)s[15]),Float.intBitsToFloat((int)s[17]),
+            Float.intBitsToFloat((int)s[18]),Float.intBitsToFloat((int)s[19]),bridge.longMemoryMessage());
+    }
+    static String configureLongMemory(boolean enabled){
+        requestedMemory=enabled ? 1:0;if(bridge!=null)bridge.configureMemory(enabled);
+        resetInputEpoch();return "长期记忆"+(enabled ? "开启":"关闭")+"请求已提交；已有向量和门控权重保留";
+    }
+    static boolean selfTrainingArmed(){return selfTraining.armed();}
+    static String selfTrainingStatus(){return selfTraining.statusText();}
+    static long rewardUpdates(){return selfTraining.updates();}
+    static long[] fullLearningCounters(){return selfTraining.fullCounters();}
+    static String explorationStatus(){return selfTraining.explorationText();}
+    static MouseMotionTracker.Sample mouseTelemetry(){return mouseMotion.current();}
+    static String setExploration(float probability,boolean bootstrap) {
+        if(!started || closed)return "请先 /vabpnn start";
+        if(probability>0 && !selfTraining.armed()) {
+            String result=setSelfTraining(true);
+            if(!selfTraining.armed())return "探索未启动："+result;
+        }
+        selfTraining.exploration(probability,bootstrap);resetInputEpoch();nextLog=0;
+        return selfTraining.explorationText()+"；"+(selfTraining.armed() ? "等待当前会话 Scorer 握手后执行":"自训练关闭");
+    }
+    static String setSelfTraining(boolean active) {
+        if(!started || closed)return "not_started";
+        if(active) {
+            try {selfTraining.enable();}
+            catch(IllegalArgumentException error){return "selftrain_unsupported";}
+            modelControl=true;predictionOnly=false;resetInputEpoch();nextLog=0;
+            return "selftrain_on";
+        }
+        selfTraining.disable("user_disabled");modelControl=false;predictionOnly=true;
+        resetInputEpoch();nextLog=0;return "selftrain_off";
+    }
+    private static void humanTakeover() {
+        if(!selfTraining.armed())return;
+        selfTraining.disable("human_intervention");modelControl=false;predictionOnly=true;
+        resetInputEpoch();nextLog=0;
+    }
     static String setPredictionOnly(boolean enabledPrediction) {
         if(!started || closed) return "not_started";
+        if(enabledPrediction)selfTraining.disable("prediction_only");
         if(enabledPrediction && predictionOnly) return "predict_already";
         if(!enabledPrediction && !predictionOnly) return "predict_inactive";
         predictionOnly=enabledPrediction;modelControl=false;
@@ -200,6 +251,7 @@ public final class CaptureController {
     /** Keep learned parameters for a quick restart; stop all new frame submissions and owned input. */
     static boolean stopPipeline() {
         if(!started || closed) return false;
+        selfTraining.disable("pipeline_stopped");
         started=false; enabled=false; modelControl=false;predictionOnly=false;
         resetInputEpoch();
         disableScopeSampling();
@@ -229,21 +281,25 @@ public final class CaptureController {
     public static void beginSynthetic() { syntheticDepth++; }
     public static void endSynthetic() { syntheticDepth--; }
     public static void onHumanMove(double dx, double dy) {
+        if(syntheticDepth==0 && inputActive && selfTraining.armed() && (dx!=0 || dy!=0))humanTakeover();
         if(syntheticDepth==0 && inputActive && !modelControl) {
             if(!predictionOnly) demonstration.move(dx,dy);
             mouseMotion.human(dx,dy); // Human motion remains observable without becoming a training target.
         }
     }
     static void onModelMove(double dx,double dy) {
-        if(modelControl && inputActive && controlAllowed) mouseMotion.executed(dx,dy);
+        if(modelControl && inputActive && controlAllowed){mouseMotion.executed(dx,dy);deliveredDx+=dx;deliveredDy+=dy;}
     }
+    static void onModelWheel(double steps){if(modelControl&&inputActive&&controlAllowed)deliveredWheel+=steps;}
     public static void onHumanButton(int button, int action) {
         if(syntheticDepth!=0 || closed) return;
+        if(selfTraining.armed())humanTakeover();
         if(inputSink!=null) syncInputContext(Minecraft.getInstance());
         boolean record=!learningFrozen() && inputActive;
         demonstration.button(button,action,record);
     }
     public static void onHumanScroll(double steps) {
+        if(syntheticDepth==0 && selfTraining.armed() && steps!=0)humanTakeover();
         if (syntheticDepth == 0 && !learningFrozen() && inputActive) demonstration.wheel(steps);
     }
     public static void onKey(long window, int action, KeyEvent event) {
@@ -251,26 +307,23 @@ public final class CaptureController {
         if (closed || continuousKey == null || window != minecraft.getWindow().handle()) return;
         if (syntheticDepth == 0 && !learningFrozen()) demonstration.key(event.key(), action, System.nanoTime());
         if (action != GLFW.GLFW_PRESS || syntheticDepth != 0 || minecraft.screen instanceof KeyBindsScreen) return;
+        if(selfTraining.armed())for(int code:ActionLayout.PHYSICAL_KEYS)
+            if(event.key()==code){humanTakeover();break;}
         Component message;
-        if(!started && (memeScopeKey.matches(event) || scopeKey.matches(event) || controlKey.matches(event)
-                || saveKey.matches(event) || continuousKey.matches(event))) {
+        if(!started && (scopeKey.matches(event) || controlKey.matches(event) || continuousKey.matches(event))) {
             InGameFeedback.hotkey(Component.translatable("message.vabpnn.not_started"));
             return;
         }
-        if(memeScopeKey.matches(event)) {
-            showMemeWindow(!memeWindowVisible());
-            message=Component.translatable(memeWindowVisible() ? "message.vabpnn.meme_scope_on":"message.vabpnn.meme_scope_off");
-        } else if(scopeKey.matches(event)) {
-            monitor.show(!monitor.visible());
-            message=Component.translatable(monitor.visible() ? "message.vabpnn.scope_on":"message.vabpnn.scope_off");
+        if(scopeKey.matches(event)) {
+            boolean show=!monitor.visible();monitor.show(show);showMemeWindow(show);
+            if(!show && bridge!=null && scopeSampling) {bridge.scopeEnabled(false,scopeTile);scopeSampling=false;}
+            message=Component.translatable(show ? "message.vabpnn.scope_on":"message.vabpnn.scope_off");
         } else if (controlKey.matches(event)) {
-            modelControl = !modelControl;predictionOnly=false;
+            boolean rewardMode=selfTraining.armed();selfTraining.disable("frozen_control");
+            modelControl = rewardMode || !modelControl;predictionOnly=false;
             resetInputEpoch();
             if(memeMonitor!=null) memeMonitor.clear();
             message = Component.translatable(modelControl ? "message.vabpnn.model_on" : "message.vabpnn.demo_on");
-        } else if (saveKey.matches(event)) {
-            InGameFeedback.requestSave();
-            return;
         } else if (continuousKey.matches(event)) {
             if (failed) { failed = false; enabled = true; } else enabled = !enabled;
             resetInputEpoch();
@@ -295,8 +348,7 @@ public final class CaptureController {
         if (smokeFrames > 0) {
             int key = renderedFrame == smokeFrames / 6 || renderedFrame == smokeFrames / 6+20 ? GLFW.GLFW_KEY_F7
                     : renderedFrame == smokeFrames / 3 || renderedFrame == smokeFrames / 3 + 20 ? GLFW.GLFW_KEY_F8
-                    : renderedFrame == smokeFrames * 2 / 3 || renderedFrame == smokeFrames * 2 / 3 + 40 ? GLFW.GLFW_KEY_F9
-                    : renderedFrame == smokeFrames - 100 ? GLFW.GLFW_KEY_F10 : 0;
+                    : renderedFrame == smokeFrames * 2 / 3 || renderedFrame == smokeFrames * 2 / 3 + 40 ? GLFW.GLFW_KEY_F9 : 0;
             if (key != 0) onKey(minecraft.getWindow().handle(), GLFW.GLFW_PRESS, new KeyEvent(key, 0, 0));
             if (renderedFrame >= smokeFrames) { minecraft.stop(); return; }
         }
@@ -309,8 +361,13 @@ public final class CaptureController {
             syncInputContext(minecraft);
             if (bridge == null) {
                 if (!enabled) return;
-                bridge = new NativeCudaBridge(capacity);
-                bridge.checkpoint(FabricLoader.getInstance().getGameDir().resolve("vabpnn/models/release-1.4.0.bin"));
+                bridge = new NativeCudaBridge(capacity,true);
+                java.nio.file.Path modelPath=java.nio.file.Path.of(System.getProperty("vabpnn.model.path",
+                        FabricLoader.getInstance().getGameDir().resolve("vabpnn/models/release-"+VabpnnMod.VERSION+".bin").toString()));
+                java.nio.file.Path vectorPath=java.nio.file.Path.of(System.getProperty("vabpnn.memory.path",
+                        System.getProperty("vabpnn.model.path")==null ? FabricLoader.getInstance().getGameDir().resolve("vabpnn/memory/experience-"+VabpnnMod.VERSION+".vdb").toString():modelPath.toString()+".vdb"));
+                bridge.memoryDatabase(vectorPath);bridge.checkpoint(modelPath);
+                if(requestedMemory>=0)bridge.configureMemory(requestedMemory==1);
                 if(requestedBlocks>=0 || requestedBlockMode>=0) bridge.configureBlocks(requestedBlocks,requestedBlockMode);
                 if(requestedMemes>=0) bridge.configureMemes(requestedMemes);
                 allocateSurfaces(newWidth, newHeight);
@@ -362,7 +419,7 @@ public final class CaptureController {
                 VabpnnMod.LOGGER.info("SNN connections: localEdges={}, anchors={}, longEdges={}, topologyUpdates={}, contributionUpdates={}; GPU operator last={} ms, max={} ms, over10ms={}",
                         gpuTiming[4], gpuTiming[5], gpuTiming[6], gpuTiming[3], gpuTiming[7], gpuTiming[0] / 1000.0, gpuTiming[1] / 1000.0, gpuTiming[2]);
                 VabpnnMod.LOGGER.info("Online learning: mode={}, examples={}, rejected={}, pixelSteps={}, decisionSteps={}, JEPA={}, mouse={}, decisionLoss={}, wheelLoss={}, checkpoint={}",
-                        predictionOnly ? "PREDICTION_ONLY/WEIGHTS_FROZEN/TOPOLOGY_DYNAMIC":modelControl ? "CONTINUOUS_CONTROL/WEIGHTS_FROZEN/TOPOLOGY_DYNAMIC" : "HUMAN/TRAINING", trainingStatus[0], trainingStatus[1], trainingStatus[2],
+                        selfTraining.armed() ? (selfTraining.exploration()>0 ? "SELFTRAIN_ALL/EXPLORATION":"SELFTRAIN_ALL/THRESHOLD/BASE_LEARNING"):predictionOnly ? "PREDICTION_ONLY/WEIGHTS_FROZEN/TOPOLOGY_DYNAMIC":modelControl ? "CONTINUOUS_CONTROL/WEIGHTS_FROZEN/TOPOLOGY_DYNAMIC" : "HUMAN/TRAINING", trainingStatus[0], trainingStatus[1], trainingStatus[2],
                         trainingStatus[3], trainingStatus[4], trainingStatus[5],
                         Float.intBitsToFloat((int)trainingStatus[6]), Float.intBitsToFloat((int)trainingStatus[7]),
                         bridge.checkpointMessage());
@@ -410,17 +467,32 @@ public final class CaptureController {
         syncInputContext(Minecraft.getInstance());
         controlAllowed=modelControl && !predictionOnly && inputActive && !resizing && bridge!=null
                 && bridge.phase()==NativeCudaBridge.READY;
-        boolean observe=started && enabled && !failed && !closed && !resizing && (inputActive || predictionOnly);
+        boolean observe=started && enabled && !failed && !closed && !resizing && (inputActive || learningFrozen());
         if(observe && command.length==7 && command[3]==1 && command[0]>0
                 && now>=command[1] && now-command[1]<=ActionExecutor.COMMAND_LEASE_NANOS
                 && Float.isFinite(Float.intBitsToFloat((int)command[4]))
                 && Float.isFinite(Float.intBitsToFloat((int)command[5]))
                 && Float.isFinite(Float.intBitsToFloat((int)command[6])))
             System.arraycopy(command,0,predictionCommand,0,7);
-        if(observe) mouseMotion.prediction(command,now);
+        if(observe) {
+            mouseMotion.prediction(command,now);
+            if(bridge!=null && mouseMotion.needsSuggestion(command[0])) {
+                bridge.readMousePrediction(mousePredictionData);
+                mouseMotion.suggestion(mousePredictionData,command,now);
+            }
+        }
+        var executionBefore=selfTraining.armed() ? selfTraining.context(Minecraft.getInstance()):null;
+        if(selfTraining.armed())controlAllowed=controlAllowed && selfTraining.prepare(command,now,executionBefore);
+        long appliedBefore=actions.appliedCommands();deliveredDx=deliveredDy=deliveredWheel=0;
         actions.apply(command,now,controlAllowed,inputSink);
+        if(selfTraining.armed())selfTraining.executed(actions.appliedFrame(),actions.appliedMask(),appliedBefore,
+                actions.appliedCommands(),System.nanoTime(),executionBefore,selfTraining.context(Minecraft.getInstance()),deliveredDx,deliveredDy,deliveredWheel);
     }
     private static void resetInputEpoch() {
+        selfTraining.boundary("input_epoch_changed");
+        resetTemporalObservations();
+    }
+    static void resetTemporalObservations() {
         controlAllowed=false;
         mouseMotion.reset();
         if(monitor!=null) monitor.motion(mouseMotion.current());
@@ -436,15 +508,25 @@ public final class CaptureController {
     }
     private static void syncInputContext(Minecraft minecraft) {
         boolean active=canInteract(minecraft), grabbed=minecraft.mouseHandler.isMouseGrabbed();
-        if(active!=inputActive || actionScene!=minecraft.level || actionScreen!=minecraft.screen || actionMouseGrabbed!=grabbed) {
+        if(active!=inputActive || actionScene!=minecraft.level || actionScreen!=minecraft.screen
+                || actionMouseGrabbed!=grabbed || actionPlayer!=minecraft.player) {
             resetInputEpoch();
-            inputActive=active; actionScene=minecraft.level; actionScreen=minecraft.screen; actionMouseGrabbed=grabbed;
+            inputActive=active;
+            actionScene=minecraft.level; actionScreen=minecraft.screen; actionMouseGrabbed=grabbed;
+            actionPlayer=minecraft.player;
         }
     }
     private static void onClientTick(Minecraft minecraft) {
         if(inputSink==null || closed) return;
         if(!failed) try {
+            syncInputContext(minecraft);
+            memoryContext.update(minecraft,bridge);
+            selfTraining.tick(bridge,started && enabled && !resizing && modelControl && !predictionOnly && inputActive,
+                    selfTraining.context(minecraft));
             applyModelCommand(controlCommand,System.nanoTime());
+            if(selfTraining.takeEpisodeCompleted()) {
+                modelControl=false;predictionOnly=true;resetInputEpoch();
+            }
             if(controlAllowed) inputSink.maintainHeldInputs(actions.heldKeys(),actions.heldButtons());
             refreshMonitor(resizing ? "调整尺寸":"");
         } catch(RuntimeException | LinkageError | OutOfMemoryError error) {
@@ -456,7 +538,7 @@ public final class CaptureController {
         }
         InGameFeedback.tick(minecraft,System.nanoTime());
     }
-    /** Immutable, low-frequency host counters for chat/HUD; no image or tensor readback. */
+    /** Immutable, low-frequency host counters for chat feedback; no image or tensor readback. */
     record FeedbackState(InputState input,Component gate,int phase,boolean scopeVisible,
                          long processed,long dropped,long examples,long pixelSteps,long decisionSteps,
                          long jepaSteps,long motionSteps,long gpuUs,long maximumGpuUs,long overBudget,
@@ -465,8 +547,8 @@ public final class CaptureController {
                          HumanInputState human,PredictionState prediction) {}
 
     static Component feedbackHotkeys() {
-        return Component.translatable("message.vabpnn.hotkeys",memeScopeKey.getTranslatedKeyMessage(),scopeKey.getTranslatedKeyMessage(),
-                controlKey.getTranslatedKeyMessage(),continuousKey.getTranslatedKeyMessage(),saveKey.getTranslatedKeyMessage());
+        return Component.translatable("message.vabpnn.hotkeys",scopeKey.getTranslatedKeyMessage(),
+                controlKey.getTranslatedKeyMessage(),continuousKey.getTranslatedKeyMessage());
     }
     static long requestCheckpoint() {
         if(!started || bridge==null || closed || failed || bridge.phase()!=NativeCudaBridge.READY) return 0;
@@ -504,7 +586,7 @@ public final class CaptureController {
             if(actions.appliedFrame()==0) reason="waiting";
             else if(actions.appliedMask()!=0 || actions.heldKeys()!=0 || actions.heldButtons()!=0) reason="executing";
             else if(decisionStatus[0]==0) reason="waiting";
-            else reason=decisionStatus[3]==0 ? "idle_k":"idle";
+            else reason=decisionStatus[3]==0 ? "idle_k":decisionStatus[2]==0 ? "idle_threshold":"idle";
         }
         else reason="demonstrating";
         return new FeedbackState(inputState(),Component.translatable("message.vabpnn.state."+reason),phase,
@@ -516,13 +598,14 @@ public final class CaptureController {
                 (int)decisionStatus[5],humanInputState(),predictionState(now));
     }
     private static void refreshMonitor(String note) {
+        if(selfTraining.armed())note=selfTraining.statusText();
         if(!started) note="待命：/vabpnn start";
         if(memeMonitor!=null) memeMonitor.status(started && enabled && !failed && !closed,learningFrozen(),note,predictionOnly);
         if(monitor!=null) {
             monitor.motion(mouseMotion.sample(System.nanoTime(),started && enabled && !failed && !closed
-                    && (inputActive || predictionOnly) && !resizing));
+                    && (inputActive || learningFrozen()) && !resizing));
             monitor.status(started && enabled,modelControl,inputActive,note,actions.appliedFrame(),
-                    actions.appliedMask(),actions.heldKeys(),actions.heldButtons(),predictionOnly);
+                    actions.appliedMask(),actions.heldKeys(),actions.heldButtons(),predictionOnly,selfTraining.fullLearning());
         }
     }
     private static void updateNetworkScope(long now,int phase) {
@@ -584,7 +667,7 @@ public final class CaptureController {
                 physicalKeys[k] = GLFW.glfwGetKey(handle, demoKeyCodes[k]) == GLFW.GLFW_PRESS;
             demonstration.physicalKeys(physicalKeys, captured);
             // Freeze neural/attention weights; native salience, placement and topology stay dynamic.
-            demonstration.snapshot(captured, inputActive, learningFrozen(), demoData, demoMotion);
+            demonstration.snapshot(captured, inputActive, modelControl || predictionOnly, demoData, demoMotion);
             demoData[ActionLayout.POINTER_MODE_INDEX] = Minecraft.getInstance().mouseHandler.isMouseGrabbed() ? 1 : 0;
             bridge.demonstration(demoData, demoMotion);
             submitted = bridge.submit(slot, fence, renderedFrame, captured);
@@ -608,6 +691,8 @@ public final class CaptureController {
         if (inputSink != null) actions.stop(inputSink);
         java.util.Arrays.fill(controlCommand,0);
         java.util.Arrays.fill(predictionCommand,0);
+        memoryContext.reset();
+        selfTraining.disable("pipeline_released");selfTraining.detach();
         if (bridge != null) { bridge.close(); bridge = null; }
         if (RenderSystem.isOnRenderThread() && GLFW.glfwGetCurrentContext() != 0) closeSurfaces();
         scopeConfigured=false; scopeSampling=false; nextScopeRead=0;
@@ -629,7 +714,7 @@ public final class CaptureController {
     public static void close() {
         if (closed) return;
         closed = true;
-        releasePipeline();
+        releasePipeline();selfTraining.close();
         if(monitor!=null) monitor.close();
         if(memeMonitor!=null) memeMonitor.close();
     }

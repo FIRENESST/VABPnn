@@ -6,6 +6,7 @@
 #include "MinuteTimeline.h"
 
 struct VabpnnDecisionModel;
+namespace vabpnn { struct SecondsLearningState; }
 
 namespace vabpnn {
 static_assert(static_cast<int>(Action::Count) == VoteCount, "Exactly 15 atomic actions.");
@@ -22,8 +23,9 @@ struct DecisionStatus {
     std::uint64_t minuteSteps;
     std::uint32_t minuteBuckets;
     std::uint64_t bayesianMotionSteps;
+    float mousePosteriorX,mousePosteriorY,mouseThresholdX,mouseThresholdY;
 };
-static_assert(sizeof(DecisionStatus)==112,"Bounded decision, position and dual-clock counters.");
+static_assert(sizeof(DecisionStatus)==128,"Bounded decision, position and dual-clock counters.");
 constexpr int DecisionWidth = 16;
 constexpr int DecisionHeads = 2;
 constexpr int DecisionHeadWidth = DecisionWidth / DecisionHeads;
@@ -100,6 +102,7 @@ struct DecisionOutput {
     float threshold[VoteCount];
     float softEligibility[VoteCount]; // For a later differentiable training objective.
     float kProbability[DecisionKChoices];
+    float kContextLogits[DecisionKChoices]; // Fixed minute/position/external-memory offsets for exact reward policy sampling.
     int selectedIndices[VoteCount];  // Descending posterior; unused entries are -1.
     std::uint32_t eligibleMask, selectedMask;
     int requestedK, selectedCount, valid;
@@ -118,6 +121,7 @@ struct DeviceDecisionView {
     const ControlCommand* command;
     const DecisionPositionAdapter* position;
     DeviceMinuteView minutes;
+    const SecondsLearningState* learningState=nullptr;
 };
 }
 
@@ -141,8 +145,8 @@ void vabpnnTrainMinuteTimeline(VabpnnMinuteModel* model,const vabpnn::DecisionPa
     const vabpnn::DecisionOutput* output,const int* active,const std::uint32_t* label,cudaStream_t stream);
 
 // Queue causal graph/time attention -> CTMC prior -> Bayes -> learned k.
-// Demonstrations retain the calibrated threshold gate. Frozen prediction/control use all
-// valid actions as candidates, continuously producing top-k packets (k=0 remains a learned rest).
+// All normal modes retain the learned strict threshold gate before top-k.
+// Each frame produces a fresh command; k=0 remains a learned rest. Explicit exploration is separate.
 // votes is 15 raw int32 totals in device memory. No per-frame allocation, wait, or CPU copy.
 // One active consumer stream per model; join other streams before the next call.
 void vabpnnLaunchTemporalDecision(const VabpnnGpuFrame& frame,

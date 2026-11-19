@@ -177,14 +177,14 @@ int main() {
         upload(parameters,p,stream);vabpnnResetDecisionState(model,stream);
         for(int step=0;step<12;++step) {
             result=run(model,deviceVotes,stream,votes,2'000'000'000ull+step*20'000'000ull,50+step,true);
-            require(result.valid && result.eligibleMask==((1u<<VoteCount)-1) && result.selectedCount==2,
-                "Continuous frozen control emits fresh top-k even with every posterior below threshold");
+            require(result.valid && result.frameId==static_cast<unsigned>(50+step) && result.requestedK==2 && !result.eligibleMask && !result.selectedMask && !result.selectedCount,
+                "Continuous frozen control emits fresh zero-action packets when every posterior is below threshold");
             for(int k=0;k<VoteCount;++k) require(result.posterior[k]<result.threshold[k],"Fixture is below every confidence threshold");
         }
         chooseK(p,0);upload(parameters,p,stream);
         result=run(model,deviceVotes,stream,votes,2'260'000'000ull,63,true);
         require(result.valid && !result.selectedMask && !result.requestedK,"Learned k=0 is a current rest packet, never forced random input");
-        std::puts("PASS: continuous no-threshold frozen selection emits fresh packets; learned rest and conflict rules remain.");
+        std::puts("PASS: continuous threshold-filtered frozen selection emits fresh packets; learned rest and conflict rules remain.");
 
         // Controlled attention: Q=K=0, V/output=identity, no FFN. CPU uses explicit weighted
         // history averages and two layer normalizations, rather than the production kernel.

@@ -104,7 +104,7 @@ final class MinecraftInputSink implements ActionExecutor.Sink {
     }
     @Override public void scroll(double steps) {
         CaptureController.beginSynthetic();
-        try { ((MouseHandlerAccess) client.mouseHandler).vabpnn$scroll(client.getWindow().handle(),0,steps); }
+        try { ((MouseHandlerAccess) client.mouseHandler).vabpnn$scroll(client.getWindow().handle(),0,steps); CaptureController.onModelWheel(steps); }
         finally { CaptureController.endSynthetic(); }
     }
     /** Recover holds reset by real input or vanilla focus restoration, without another click edge. */

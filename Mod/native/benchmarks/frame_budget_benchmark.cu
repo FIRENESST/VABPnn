@@ -3,13 +3,17 @@
 #include "SpikeConnections.h"
 #include "NetworkScope.h"
 #include "MemeState.h"
+#include "RewardPolicy.h"
+#include "LongTermMemory.h"
 #include <cstdio>
 #include <vector>
 #include <algorithm>
 #include <numeric>
+#include <array>
 #include <chrono>
 #include <stdexcept>
 #include <string>
+bool RewardStress=false;
 bool PositionEnabled=true,BlocksEnabled=true,BlockStress=false,MemeStress=false,MemesEnabled=true,MemeScopeEnabled=false,MinuteStress=false;
 void check(cudaError_t code) { if(code!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(code)); }
 __global__ void pattern(unsigned char* image,std::size_t pitch,int width,int height) {
@@ -48,6 +52,29 @@ __global__ void matureMemeFixture(vabpnn::DeviceMemeView v,std::uint64_t sequenc
     for(int at=0;at<vabpnn::MemeWeights;++at)
         if(v.persistent->policy[tile].optimizerSteps==0)v.persistent->policy[tile].weights[at]=.025f;
 }
+// Mature supported experience index; fixture preparation is outside all timed events.
+__global__ void matureLongMemoryFixture(vabpnn::DeviceLongMemoryView v,std::uint64_t wallMillis) {
+    const int id=blockIdx.x*blockDim.x+threadIdx.x;if(id>=vabpnn::LongMemoryCapacity)return;
+    auto& e=v.entries[id];e={};
+    for(int d=0;d<vabpnn::LongMemoryDimension;++d)e.key[d]=v.trace->key[d];
+    for(int a=0;a<vabpnn::VoteCount;++a)e.action[a]=a==0 ? .8f:.1f;
+    for(int k=0;k<vabpnn::LongMemoryKChoices;++k)e.kMass[k]=k==1 ? .8f:.2f/15;
+    e.worldHi=11;e.worldLo=22;e.sessionHi=33;e.sessionLo=44;e.ordinal=id+1;
+    e.wallMillis=e.lastSeenMillis=wallMillis-id*400;e.observedSeconds=3600-id*.4;
+    e.seconds=420-id*.4f;e.minutes=e.seconds/60;e.labels=64;e.quality=.8f;e.valid=1;
+    if(id==0){v.catalog->used=vabpnn::LongMemoryCapacity;v.catalog->ordinal=vabpnn::LongMemoryCapacity+1;
+        v.catalog->observedSeconds=3600;
+        for(int a=0;a<vabpnn::VoteCount;++a)v.persistent->parameters.evidenceGain[a]=.1f;
+        for(int k=0;k<vabpnn::LongMemoryKChoices;++k)v.persistent->parameters.kGain[k]=.05f;}
+}
+// Reuse the previous completed visual key to keep all 8192 entries above the cosine cutoff,
+// including during JEPA updates. Frozen profiles seed only before measurement;
+// every measured frozen frame keeps the entire index unchanged.
+__global__ void refreshLongMemoryFixture(vabpnn::DeviceLongMemoryView v) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i<vabpnn::LongMemoryCapacity*vabpnn::LongMemoryDimension)
+        v.entries[i/vabpnn::LongMemoryDimension].key[i%vabpnn::LongMemoryDimension]=v.trace->key[i%vabpnn::LongMemoryDimension];
+}
 struct Sample { double copy,op,total,wall; int jepa,pixel,topology,scope,actor,ranking,mutation,meme; };
 void report(const char* label,const std::vector<Sample>& values) {
     if(values.empty()) return;
@@ -61,15 +88,17 @@ void report(const char* label,const std::vector<Sample>& values) {
         copy/times.size(),total/times.size(),wall/times.size());
     std::printf(" budget_over10=%d total_max=%.4f ms\n",over10,maximumTotal);
 }
-void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bool forceRanking=false) {
+void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bool forceRanking=false,bool trainRewards=false) {
     constexpr int Width=1920,Height=1024,Warmup=64,Count=512;
     cudaStream_t stream=nullptr; unsigned char* source=nullptr; unsigned char* image=nullptr; float* rgb=nullptr;
     std::size_t sourcePitch=0,pitch=0; cudaEvent_t events[4]{};
     VabpnnNeuronModel* neuron=nullptr; VabpnnDecisionModel* decision=nullptr;
     VabpnnJepaModel* jepa=nullptr; VabpnnOnlineModel* online=nullptr; VabpnnSpikeModel* spike=nullptr;
+    VabpnnRewardPolicy* reward=nullptr;vabpnn::RewardBatch batch{};
+    VabpnnLongMemory* memory=nullptr;
     vabpnn::ScopeTelemetry* scopeDevice=nullptr;
     vabpnn::MemeScopeTelemetry* memeScopeDevice=nullptr;vabpnn::MemeRelayTrace* memeTrace=nullptr;
-    struct HostStatus { vabpnn::ControlCommand command; vabpnn::DecisionStatus decision; vabpnn::OnlineOutput online; vabpnn::JepaOutput jepa; vabpnn::SpikeCounters spike; vabpnn::BlockCounters blocks; vabpnn::MemeCounters memes; vabpnn::ScopeTelemetry scope; vabpnn::MemeScopeTelemetry memeScope; };
+    struct HostStatus { vabpnn::LongMemoryStatus memory;vabpnn::RewardProposal reward;vabpnn::ControlCommand command; vabpnn::DecisionStatus decision; vabpnn::OnlineOutput online; vabpnn::JepaOutput jepa; vabpnn::SpikeCounters spike; vabpnn::BlockCounters blocks; vabpnn::MemeCounters memes; vabpnn::ScopeTelemetry scope; vabpnn::MemeScopeTelemetry memeScope; };
     HostStatus* status=nullptr;
     try {
         check(cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking));
@@ -86,6 +115,7 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
         for(auto& event:events) check(cudaEventCreate(&event));
         pattern<<<dim3(120,64),dim3(16,16),0,stream>>>(source,sourcePitch,Width,Height);
         neuron=vabpnnCreateNeuronModel(stream); decision=vabpnnCreateDecisionModel(stream);
+        memory=vabpnnCreateLongMemory(stream);
         jepa=vabpnnCreateJepaModel(stream); online=vabpnnCreateOnlineModel(stream); spike=vabpnnCreateSpikeModel(stream);
         auto blockConfig=vabpnn::BlockConfig{}; blockConfig.enabled=BlocksEnabled;
         if(forceRanking) { blockConfig.warmup=0; blockConfig.rankEvery=20; blockConfig.poorWindows=1; }
@@ -122,6 +152,13 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
             }
             check(cudaStreamSynchronize(stream));check(cudaFree(seedVotes));
         }
+        // Warmup supplies the first actual query key before any measured frames. Do not
+        // advance the operator here: doing so shifts the existing worst-case overlap schedules.
+        matureLongMemoryFixture<<<32,256,0,stream>>>(vabpnnLongMemoryView(memory),1790000000000ull);
+        if(trainRewards) {
+            reward=vabpnnCreateRewardPolicy(stream);vabpnnConfigureRewardPolicy(reward,1,true,stream,1,true);
+            batch.epoch=1;batch.credit=1;
+        }
         check(cudaStreamSynchronize(stream));
         std::vector<Sample> all,ordinary,jepaFrames,pixelFrames,both,topologyFrames,topologyPixel,scopeFrames,allOverlap;
         std::vector<Sample> actorFrames,rankingFrames,mutationFrames,completeOverlap,memeFrames,completeMemeOverlap;
@@ -129,30 +166,52 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
         std::uint64_t previousTopology=0;
         std::uint64_t previousJepa=0,previousPixel=0;
         vabpnn::DemoSample demo; demo.active=1; demo.epoch=1; demo.modelControl=mode; demo.pointerMode=1; demo.heldKeys=1;
+        std::array<vabpnn::RewardProposal,vabpnn::RewardCacheSlots> receipts{};
         for(int i=0;i<Warmup+Count;++i) {
             const auto id=static_cast<std::uint64_t>(i+1);
             const auto minuteOffset=MinuteStress ? (vabpnn::MinuteHistory-1)*vabpnn::MinuteNanos:0;
             const auto nanos=1'000'000'000ULL+minuteOffset+id*16'666'667ULL;
             demo.mouseX+=1; demo.keyHeldNanos[0]+=16'666'667ULL;
             VabpnnGpuFrame frame{image,pitch,rgb,Width,Height,id,nanos,stream,neuron,decision,jepa,online,spike};
+            frame.longMemory=memory;frame.longMemoryContext={11,22,33,44,nanos,1790000000000ull+id*17};
             const auto sampleId=(id-1)/2*2+1; // 30 Hz observations, 60 Hz predictions.
             if(PositionEnabled) frame.position={1'000'000'000ULL+minuteOffset+sampleId*16'666'667ULL,1,
                 125.0+sampleId/30.0,64.0,-82.0+sampleId/60.0};
             if(forceRanking && i>0 && i%20==0)
                 matureRankFixture<<<30,256,0,stream>>>(vabpnnMutableBlockPersistent(blockModel,stream));
-            if(MemeStress && MemesEnabled && !mode)
+            if(MemeStress && MemesEnabled)
                 matureMemeFixture<<<30,256,0,stream>>>(vabpnnMemeModelView(memeModel),id);
+            if(trainRewards && i>0 && i%vabpnn::RewardCacheSlots==0) {
+                batch.rewardId++;batch.count=0;batch.credit=batch.rewardId%2 ? 1:-1;
+                for(unsigned j=0;j<vabpnn::RewardCacheSlots;++j){
+                    const auto fid=id-vabpnn::RewardCacheSlots+j;const auto& receipt=receipts[fid%vabpnn::RewardCacheSlots];
+                    if(receipt.valid && receipt.frameId==fid){batch.frames[batch.count]=fid;batch.masks[batch.count++]=receipt.mask;}
+                }
+                if(batch.count!=vabpnn::RewardCacheSlots)throw std::runtime_error("Full reward cache was not actually filled");
+            }
+            if(i>0 && (!mode || i==Warmup-1))refreshLongMemoryFixture<<<2048,256,0,stream>>>(vabpnnLongMemoryView(memory));
             const auto begin=std::chrono::steady_clock::now();
             check(cudaEventRecord(events[0],stream));
             check(cudaMemcpy2DAsync(image,pitch,source,sourcePitch,Width*4,Height,cudaMemcpyDeviceToDevice,stream));
             check(cudaEventRecord(events[1],stream));
             frame.evaluationMode=demo.modelControl!=0;frame.memeTrace=memeTrace;
+            if(trainRewards && batch.count){
+                vabpnnApplyRewardBatch(reward,vabpnnMutableDecisionParameters(decision,stream),batch,stream);batch.count=0;
+            }
             vabpnnSetDemoSample(online,&demo,stream); vabpnnLaunchOperator(frame);
+            if(trainRewards) {
+                const auto v=vabpnnDecisionModelView(decision);
+                vabpnnProposeRewardAction(reward,v.parameters,v.constraints,
+                    const_cast<vabpnn::DecisionOutput*>(v.output),vabpnnJepaModelView(jepa).output,
+                    vabpnnMutableMotionProposal(decision,stream),stream);
+            }
             const bool sampleScope=forceRanking || i%6==0;
             if(sampleScope) vabpnnLaunchNetworkScope(frame,32*120+60,scopeDevice);
             const bool sampleMeme=MemeScopeEnabled && i%12==0; // 5 Hz at simulated 60 Hz.
             if(sampleMeme) vabpnnLaunchMemeScope(frame,32*120+60,memeScopeDevice);
             check(cudaEventRecord(events[2],stream));
+            check(cudaMemcpyAsync(&status->memory,&vabpnnLongMemoryView(memory).output->status,sizeof(status->memory),cudaMemcpyDeviceToHost,stream));
+            if(trainRewards)check(cudaMemcpyAsync(&status->reward,vabpnnRewardPolicyView(reward).proposal,sizeof(status->reward),cudaMemcpyDeviceToHost,stream));
             check(cudaMemcpyAsync(&status->command,vabpnnDecisionModelView(decision).command,sizeof(status->command),cudaMemcpyDeviceToHost,stream));
             check(cudaMemcpyAsync(&status->decision,&vabpnnDecisionModelView(decision).output->status,sizeof(status->decision),cudaMemcpyDeviceToHost,stream));
             check(cudaMemcpyAsync(&status->online,vabpnnOnlineOutput(online),sizeof(status->online),cudaMemcpyDeviceToHost,stream));
@@ -163,6 +222,7 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
             if(sampleScope) check(cudaMemcpyAsync(&status->scope,scopeDevice,sizeof(vabpnn::ScopeTelemetry),cudaMemcpyDeviceToHost,stream));
             if(sampleMeme) check(cudaMemcpyAsync(&status->memeScope,memeScopeDevice,sizeof(vabpnn::MemeScopeTelemetry),cudaMemcpyDeviceToHost,stream));
             check(cudaEventRecord(events[3],stream)); check(cudaEventSynchronize(events[3]));
+            if(trainRewards)receipts[id%vabpnn::RewardCacheSlots]=status->reward;
             const double wall=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
             float copy=0,op=0,total=0;
             check(cudaEventElapsedTime(&copy,events[0],events[1]));
@@ -178,6 +238,10 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
             const bool meme=status->memes.projectionUpdates>previousMeme;previousMeme=status->memes.projectionUpdates;
             if(MinuteStress && status->decision.minuteBuckets!=vabpnn::MinuteHistory)
                 throw std::runtime_error("Minute stress must retain all eight observed bins");
+            if(i>=Warmup && (status->memory.used!=vabpnn::LongMemoryCapacity || status->memory.retrieved!=vabpnn::LongMemoryTopK || status->memory.strength<=0)) {
+                std::fprintf(stderr,"Memory fixture frame=%d valid=%u enabled=%u used=%u top=%u sim=%.5f strength=%.5f\n",i,status->memory.valid,status->memory.enabled,status->memory.used,status->memory.retrieved,status->memory.similarity,status->memory.strength);
+                throw std::runtime_error("Full supported memory retrieval, Bayesian fusion and gates were not actually active");
+            }
             if(i>=Warmup) {
                 Sample sample{copy,op,total,wall,learnedJepa,learnedPixel,topology,sampleScope,actor,rank,mutation,meme};
                 if(meme)memeFrames.push_back(sample);
@@ -201,7 +265,12 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
             static_cast<unsigned long long>(status->jepa.selfSupervisedSteps),
             static_cast<unsigned long long>(status->online.examples),
             static_cast<unsigned long long>(status->jepa.motionSteps),
-            static_cast<unsigned long long>(vabpnnNeuronModelBytes(neuron)+vabpnnDecisionModelBytes(decision)+vabpnnJepaModelBytes(jepa)+vabpnnOnlineModelBytes(online)+vabpnnSpikeModelBytes(spike)+sizeof(vabpnn::ScopeTelemetry)+(MemeScopeEnabled ? sizeof(vabpnn::MemeScopeTelemetry)+vabpnn::MemeBlocks*sizeof(vabpnn::MemeRelayTrace):0)));
+            static_cast<unsigned long long>(vabpnnLongMemoryBytes(memory)+vabpnnNeuronModelBytes(neuron)+vabpnnDecisionModelBytes(decision)+vabpnnJepaModelBytes(jepa)+vabpnnOnlineModelBytes(online)+vabpnnSpikeModelBytes(spike)+sizeof(vabpnn::ScopeTelemetry)+(MemeScopeEnabled ? sizeof(vabpnn::MemeScopeTelemetry)+vabpnn::MemeBlocks*sizeof(vabpnn::MemeRelayTrace):0)));
+        std::printf("MEMORY_STRESS used=%u retrieved=%u queries=%llu supervised=%llu gate_steps=%llu seconds=%.2f minutes=%.2f age_seconds=%.2f strength=%.5f bytes=%llu\n",
+            status->memory.used,status->memory.retrieved,(unsigned long long)status->memory.queries,
+            (unsigned long long)status->memory.supervised,(unsigned long long)status->memory.steps,
+            status->memory.seconds,status->memory.minutes,status->memory.ageSeconds,status->memory.strength,
+            (unsigned long long)vabpnnLongMemoryBytes(memory));
         report("all",all); report("ordinary",ordinary); report("JEPA_update",jepaFrames);
         report("pixel_update",pixelFrames); report("JEPA_and_pixel",both);
         report("topology_update",topologyFrames); report("topology_and_pixels",topologyPixel);
@@ -228,8 +297,14 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
         if(forceRanking && (rankingFrames.empty() || mutationFrames.empty() || completeOverlap.empty()))
             throw std::runtime_error("controller sorting/mutation/full overlap was not actually measured");
         if(status->spike.anchors!=256 || status->spike.longEdges<80000) throw std::runtime_error("full-capacity long graph was not measured");
+        if(trainRewards){vabpnn::RewardStatus rewardStatus{};
+            check(cudaMemcpy(&rewardStatus,vabpnnRewardPolicyView(reward).status,sizeof(rewardStatus),cudaMemcpyDeviceToHost));
+            if(rewardStatus.updates<1 || rewardStatus.proposals<Count)throw std::runtime_error("Reward stress did not exercise actual GPU learning");
+            std::printf("REWARD_STRESS updates=%llu proposals=%llu full-cache=512 weights=1022\n",
+                static_cast<unsigned long long>(rewardStatus.updates),static_cast<unsigned long long>(rewardStatus.proposals));}
     } catch(...) {
         if(stream) cudaStreamSynchronize(stream);
+        vabpnnDestroyRewardPolicy(reward);vabpnnDestroyLongMemory(memory);
         if(memeScopeDevice) cudaFree(memeScopeDevice);if(memeTrace) cudaFree(memeTrace);
         if(scopeDevice) cudaFree(scopeDevice); vabpnnDestroySpikeModel(spike); vabpnnDestroyOnlineModel(online); vabpnnDestroyJepaModel(jepa);
         vabpnnDestroyDecisionModel(decision); vabpnnDestroyNeuronModel(neuron);
@@ -238,6 +313,7 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
         throw;
     }
     check(cudaStreamSynchronize(stream));
+    vabpnnDestroyRewardPolicy(reward);vabpnnDestroyLongMemory(memory);
     if(memeScopeDevice) cudaFree(memeScopeDevice);if(memeTrace) cudaFree(memeTrace);
         if(scopeDevice) cudaFree(scopeDevice); vabpnnDestroySpikeModel(spike); vabpnnDestroyOnlineModel(online); vabpnnDestroyJepaModel(jepa);
     vabpnnDestroyDecisionModel(decision); vabpnnDestroyNeuronModel(neuron);
@@ -247,6 +323,7 @@ void profile(int mode,int selfSupervised,const char* label,bool overlap=false,bo
 int main(int argc,char** argv) {
     for(int i=1;i<argc;i++) {
         const std::string arg=argv[i];
+        if(arg=="--reward-stress") RewardStress=true;
         if(arg=="--without-position") PositionEnabled=false;
         if(arg=="--without-blocks") BlocksEnabled=false;
         if(arg=="--block-stress") BlockStress=true;
@@ -255,6 +332,7 @@ int main(int argc,char** argv) {
         if(arg=="--minute-stress") MinuteStress=true;
         if(arg=="--without-memes") MemesEnabled=false;
     }
+    std::printf("LONG_MEMORY=8192 supported vectors / 64 dimensions / exact top-8 / active learned gates and Bayesian fusion (mature stress fixture)\n");
     std::printf("MINUTE_HISTORY=%s (observed eight-bin causal history)\n",MinuteStress ? "mature stress":"normal");
     std::printf("MEME_SCOPE=%s (5 Hz telemetry + continuous optional relay trace)\n",MemeScopeEnabled ? "enabled":"hidden");
     std::printf("MEMES=%s mature_fixture=%d\n",MemesEnabled ? "enabled":"disabled",MemeStress);
@@ -268,6 +346,7 @@ int main(int argc,char** argv) {
         profile(0,1,"human_demo_plus_JEPA");
         profile(0,1,"stress_topology_pixels_JEPA_every_frame",true);
         if(BlockStress) profile(0,1,"stress_hierarchy_rank_mutation_fixture",true,true);
+        if(RewardStress)profile(1,0,"selftrain_bootstrap_full_reward_cache",false,false,true);
         return 0;
     } catch(const std::exception& error) { std::fprintf(stderr,"%s\n",error.what()); return 1; }
 }

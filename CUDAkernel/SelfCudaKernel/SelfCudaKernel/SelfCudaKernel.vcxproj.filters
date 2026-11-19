@@ -23,8 +23,17 @@
     <ClInclude Include="MinuteTimeline.h"><Filter>Temporal</Filter></ClInclude>
     <CudaCompile Include="JepaMotion.cu"><Filter>Representation</Filter></CudaCompile>
     <ClInclude Include="JepaMotion.h"><Filter>Representation</Filter></ClInclude>
+    <CudaCompile Include="PnnJepa.cu"><Filter>Representation</Filter></CudaCompile>
+    <ClInclude Include="PnnJepa.h"><Filter>Representation</Filter></ClInclude>
     <CudaCompile Include="OnlineLearning.cu"><Filter>Learning</Filter></CudaCompile>
+    <CudaCompile Include="FullSelfLearning.cu"><Filter>Learning</Filter></CudaCompile>
+    <CudaCompile Include="SecondsLearning.cu"><Filter>Learning</Filter></CudaCompile>
+    <CudaCompile Include="RewardPolicy.cu"><Filter>Learning</Filter></CudaCompile>
+    <CudaCompile Include="LongTermMemory.cu"><Filter>Learning</Filter></CudaCompile>
     <ClInclude Include="OnlineLearning.h"><Filter>Learning</Filter></ClInclude>
+    <ClInclude Include="FullSelfLearning.h"><Filter>Learning</Filter></ClInclude>
+    <ClInclude Include="RewardPolicy.h"><Filter>Learning</Filter></ClInclude>
+    <ClInclude Include="LongTermMemory.h"><Filter>Learning</Filter></ClInclude>
     <CudaCompile Include="BlockControllers.cu"><Filter>Learning</Filter></CudaCompile>
     <ClInclude Include="BlockControllers.h"><Filter>Learning</Filter></ClInclude>
     <CudaCompile Include="MemeState.cu"><Filter>Learning</Filter></CudaCompile>

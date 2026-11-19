@@ -1,0 +1,7 @@
+/.gradle/
+/build/
+/run/
+/data/
+/*.log
+/sync-build.ps1
+

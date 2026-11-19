@@ -8,9 +8,15 @@ struct VabpnnDecisionModel;
 struct VabpnnJepaModel;
 struct VabpnnOnlineModel;
 struct VabpnnSpikeModel;
+struct VabpnnLongMemory;
+struct VabpnnFullLearning;
 
 namespace vabpnn {
 struct MemeRelayTrace;
+struct LongMemoryContext {
+    std::uint64_t worldHi=0,worldLo=0,sessionHi=0,sessionLo=0,sampleNanos=0,wallMillis=0;
+};
+static_assert(sizeof(LongMemoryContext)==48,"World/life identity and causal clocks only.");
 // Same monotonic clock as captureNanos; zero timestamp means no current local player.
 struct PlayerPositionSample {
     std::uint64_t sampleNanos = 0, epoch = 0;
@@ -38,6 +44,11 @@ struct VabpnnGpuFrame {
     bool evaluationMode = false; // Freeze neural weights/optimizers; salience and CSR plasticity remain dynamic.
     // Optional observation state, separate from learning and checkpoints.
     vabpnn::MemeRelayTrace* memeTrace = nullptr;
+    VabpnnLongMemory* longMemory=nullptr; // External bounded vector index, owned by worker.
+    vabpnn::LongMemoryContext longMemoryContext{};
+    bool selfLearning=false; // Reward training unfreezes all branches; never creates human targets.
+    VabpnnFullLearning* fullLearning=nullptr;
+    bool pnnJepa=false; // 2.0 uses PNN features and decodes the JEPA spatial latents.
 };
 
 // Replace this consumer with your operator. Queue work on frame.stream without host waits.

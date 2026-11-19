@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "vabpnn",
+  "version": "${version}",
+  "name": "VABPnn Compare",
+  "description": "Independent compare-1.0.0-beta: complete 7680-block Transformer, 2 learned ordered-pair bias heads, 118092354 Transformer parameters. Cannot run alongside the formal VABPnn mod.",
+  "authors": [
+    "VABPnn"
+  ],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "cn.vabpnn.mod.VabpnnMod"
+    ],
+    "client": [
+      "cn.vabpnn.mod.client.VabpnnClient"
+    ]
+  },
+  "mixins": [
+    "vabpnn.mixins.json",
+    {
+      "config": "vabpnn.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "${minecraft_version}",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

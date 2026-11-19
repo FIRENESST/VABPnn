@@ -3,13 +3,19 @@
   "id": "vabpnn",
   "version": "${version}",
   "name": "VABPnn Continuous GPU Capture",
-  "description": "Continuous FBO-to-CUDA capture, bounded device frame pool and asynchronous GPU operators for Minecraft 26.1. Windows x64 / NVIDIA.",
-  "authors": ["VABPnn"],
+  "description": "Continuous FBO/CUDA PNN, seconds/minutes graph, external GPU vector long-term memory with learned gates, JEPA/Bayesian motion and opt-in acknowledged Scorer self-training for Minecraft 26.1. Windows x64 / NVIDIA.",
+  "authors": [
+    "VABPnn"
+  ],
   "license": "MIT",
   "environment": "*",
   "entrypoints": {
-    "main": ["cn.vabpnn.mod.VabpnnMod"],
-    "client": ["cn.vabpnn.mod.client.VabpnnClient"]
+    "main": [
+      "cn.vabpnn.mod.VabpnnMod"
+    ],
+    "client": [
+      "cn.vabpnn.mod.client.VabpnnClient"
+    ]
   },
   "mixins": [
     "vabpnn.mixins.json",

@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="SelfCudaKernel/SelfCudaKernel.vcxproj" Id="07f1945b-af2a-42d8-aea4-64889080f37e" />
+</Solution>

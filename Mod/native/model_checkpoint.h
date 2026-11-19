@@ -59,6 +59,11 @@ template<class Header> inline Header validateModelCheckpointFormat(std::ifstream
     else if(version==6) { expected.magic[6]='B'; expected.version=6; }
     else if(version==7) { expected.magic[6]='C'; expected.version=7; }
     else if(version==8) { expected.magic[6]='D'; expected.version=8; }
+    else if(version==12) { expected.magic[6]='H'; expected.version=12; }
+    else if(version==13) { expected.magic[6]='I'; expected.version=13; }
+    else if(version==14) { expected.magic[6]='J'; expected.version=14; }
+    else if(version==15) { expected.magic[6]='K'; expected.version=15; }
+    else if(version==16) { expected.magic[6]='L'; expected.version=16; }
     Header header{};
     if(!file.read(reinterpret_cast<char*>(&header),sizeof(header))
         || std::memcmp(header.magic,expected.magic,8)!=0 || header.version!=expected.version
@@ -85,12 +90,20 @@ template<class Header> inline bool loadModelCheckpointFormat(const std::wstring&
     const auto header=validateModelCheckpointFormat<Header>(file,path,parts,legacy,version);
     std::vector<unsigned char> buffer(1024*1024);
     file.clear(); file.seekg(sizeof(header));
-    for(const auto& part:parts) for(std::size_t offset=0;offset<part.bytes;) {
-        const auto bytes=std::min(part.bytes-offset,buffer.size());
-        if(!file.read(reinterpret_cast<char*>(buffer.data()),bytes)) throw std::runtime_error("Checkpoint read failed");
-        auto code=cudaMemcpy(static_cast<unsigned char*>(part.device)+offset,buffer.data(),bytes,cudaMemcpyHostToDevice);
-        if(code!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(code));
-        offset+=bytes;
+    for(const auto& part:parts) {
+        // A migration may verify a complete file and load only the compatible parts.
+        if(!part.device) {
+            if(!file.seekg(static_cast<std::streamoff>(part.bytes),std::ios::cur))
+                throw std::runtime_error("Checkpoint seek failed");
+            continue;
+        }
+        for(std::size_t offset=0;offset<part.bytes;) {
+            const auto bytes=std::min(part.bytes-offset,buffer.size());
+            if(!file.read(reinterpret_cast<char*>(buffer.data()),bytes)) throw std::runtime_error("Checkpoint read failed");
+            auto code=cudaMemcpy(static_cast<unsigned char*>(part.device)+offset,buffer.data(),bytes,cudaMemcpyHostToDevice);
+            if(code!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(code));
+            offset+=bytes;
+        }
     }
     return true;
 }
@@ -103,6 +116,11 @@ template<class Header> inline void saveModelCheckpointFormat(const std::wstring&
     else if(version==6) { header.magic[6]='B'; header.version=6; }
     else if(version==7) { header.magic[6]='C'; header.version=7; }
     else if(version==8) { header.magic[6]='D'; header.version=8; }
+    else if(version==12) { header.magic[6]='H'; header.version=12; }
+    else if(version==13) { header.magic[6]='I'; header.version=13; }
+    else if(version==14) { header.magic[6]='J'; header.version=14; }
+    else if(version==15) { header.magic[6]='K'; header.version=15; }
+    else if(version==16) { header.magic[6]='L'; header.version=16; }
     std::ofstream file(std::filesystem::path(temporary),std::ios::binary|std::ios::trunc);
     if(!file.write(reinterpret_cast<char*>(&header),sizeof(header))) throw std::runtime_error("Could not open checkpoint");
     Sha256 hash;

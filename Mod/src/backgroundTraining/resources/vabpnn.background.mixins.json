@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "cn.vabpnn.mod.mixin.background",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "HiddenWindowMixin",
+    "BackgroundClientMixin",
+    "BackgroundMouseMixin",
+    "BackgroundCursorMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

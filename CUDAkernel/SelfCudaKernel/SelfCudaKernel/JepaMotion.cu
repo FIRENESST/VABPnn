@@ -1,4 +1,6 @@
 #include "JepaMotion.h"
+#include "FullSelfLearning.h"
+#include "PnnJepa.h"
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -34,6 +36,8 @@ struct JepaWorkspace {
     float latentMean[JepaWidth], latentStd[JepaWidth], momentGradient[JepaMoments];
     float motionInput[JepaMotionInput], motionHidden[JepaHidden], motionRaw[2];
     float motionGradient[2], motionHiddenGradient[JepaHidden];
+    JepaDecoderInput decoder;
+    JepaEncoder actionCreditEncoder;
 };
 constexpr std::uint64_t JepaBytes = sizeof(JepaParameters) * 4 + sizeof(JepaEncoder)
     + sizeof(JepaConfig) + sizeof(JepaState) + sizeof(JepaWorkspace)
@@ -240,8 +244,10 @@ __global__ void finishFrame(JepaWorkspace* work, JepaState* state, JepaOutput* o
     out->motionActive = out->valid && out->pairReady && config->motionEnabled;
     out->rateX = out->motionActive ? rx : 0; out->rateY = out->motionActive ? ry : 0;
     const float dt = fminf(out->deltaSeconds, config->maxMotionDtSeconds);
-    out->mouseDx = out->motionActive ? fminf(config->maxMouseDelta, fmaxf(-config->maxMouseDelta, rx*dt)) : 0;
-    out->mouseDy = out->motionActive ? fminf(config->maxMouseDelta, fmaxf(-config->maxMouseDelta, ry*dt)) : 0;
+    out->suggestedDx=out->valid && out->pairReady ? fminf(config->maxMouseDelta,fmaxf(-config->maxMouseDelta,rx*dt)):0;
+    out->suggestedDy=out->valid && out->pairReady ? fminf(config->maxMouseDelta,fmaxf(-config->maxMouseDelta,ry*dt)):0;
+    out->mouseDx = out->motionActive ? out->suggestedDx : 0;
+    out->mouseDy = out->motionActive ? out->suggestedDy : 0;
     if (proposal) { proposal->mouseDx = out->mouseDx; proposal->mouseDy = out->mouseDy; }
     state->historyReady = out->valid;
     state->lastNanos = out->captureNanos; state->lastFrame = out->frameId;
@@ -507,7 +513,7 @@ vabpnn::DeviceJepaView vabpnnJepaModelView(const VabpnnJepaModel* model) {
         &model->work->currentFeatures[0][0], &model->work->previousFeatures[0][0],
         &model->work->currentLatent[0][0], &model->work->previousLatent[0][0],
         &model->work->targetLatent[0][0], &model->work->prediction[0][0],
-        model->gradient, model->first, model->second};
+        model->gradient, model->first, model->second,model->work->motionInput,model->work->motionHidden};
 }
 vabpnn::JepaParameters* vabpnnMutableJepaParameters(VabpnnJepaModel* model, cudaStream_t stream) {
     waitReady(model,stream); return model->parameters;
@@ -530,7 +536,8 @@ void vabpnnLaunchJepaForward(const VabpnnGpuFrame& frame, const std::int32_t* vo
     // Re-encode historical raw features with current weights; no stale trained projections.
     check(cudaMemcpyAsync(w->previousFeatures,w->historyFeatures,sizeof(w->previousFeatures),
                           cudaMemcpyDeviceToDevice,frame.stream),"stage JEPA past features");
-    poolPatches<<<JepaTokens*JepaCells*JepaCells,dim3(16,16),0,frame.stream>>>(frame,w);
+    if (frame.pnnJepa) vabpnnPoolPnnForJepa(frame, &w->currentFeatures[0][0]);
+    else poolPatches<<<JepaTokens*JepaCells*JepaCells,dim3(16,16),0,frame.stream>>>(frame,w);
     forwardMlp<<<JepaTokens,256,0,frame.stream>>>(&model->parameters->encoder,&w->currentFeatures[0][0],
         &w->currentHidden[0][0],&w->currentLatent[0][0],model->output,false);
     forwardMlp<<<JepaTokens,256,0,frame.stream>>>(&model->parameters->encoder,&w->previousFeatures[0][0],
@@ -541,6 +548,16 @@ void vabpnnLaunchJepaForward(const VabpnnGpuFrame& frame, const std::int32_t* vo
     buildPredictorInput<<<JepaTokens,256,0,frame.stream>>>(w,model->output);
     forwardMlp<<<JepaTokens,256,0,frame.stream>>>(&model->parameters->predictor,&w->predictorInput[0][0],
         &w->predictorHidden[0][0],&w->prediction[0][0],model->output,true);
+    if (frame.pnnJepa) {
+        vabpnnPoolJepaDecoderInput(&w->currentLatent[0][0], &w->prediction[0][0],
+            model->output, &w->decoder, frame.stream);
+        votes = w->decoder.votes;
+        if (frame.selfLearning && frame.frameId % FullVisualEvery == 0) {
+            // SSL updates later on this stream. Reward uses the encoder that produced this action.
+            check(cudaMemcpyAsync(&w->actionCreditEncoder, &model->parameters->encoder,
+                sizeof(JepaEncoder), cudaMemcpyDeviceToDevice, frame.stream), "cache PNN JEPA credit weights");
+        }
+    }
     buildMotionInput<<<1,256,0,frame.stream>>>(w,model->output,votes);
     forwardMlp<<<1,256,0,frame.stream>>>(&model->parameters->motion,w->motionInput,
         w->motionHidden,w->motionRaw,model->output,false);
@@ -550,6 +567,17 @@ void vabpnnLaunchJepaForward(const VabpnnGpuFrame& frame, const std::int32_t* vo
     check(cudaMemcpyAsync(w->historyFeatures,w->currentFeatures,sizeof(w->historyFeatures),
                           cudaMemcpyDeviceToDevice,frame.stream),"cache JEPA patch history");
 }
+const vabpnn::JepaDecoderInput* vabpnnJepaDecoderInput(const VabpnnJepaModel* model) {
+    return &model->work->decoder;
+}
+
+void vabpnnScoreJepaPnnFeatures(const VabpnnJepaModel* model, const float* spatialScore,
+    const float* scalarScore, float* patchScore, cudaStream_t stream) {
+    auto* w = model->work;
+    vabpnnBackpropPnnJepa(&w->actionCreditEncoder, &w->currentHidden[0][0], model->output,
+        &w->decoder, spatialScore, scalarScore, patchScore, stream);
+}
+
 void vabpnnTrainJepaSelfSupervised(VabpnnJepaModel* model, cudaStream_t stream) {
     waitReady(model,stream);
     auto* w = model->work;
@@ -621,4 +649,14 @@ void vabpnnResumeJepaOptimizer(VabpnnJepaModel* m,cudaStream_t stream) {
     vabpnnResetJepaHistory(m,stream);
     resumeJepaGroups<<<1,1,0,stream>>>(m->groups);
     check(cudaGetLastError(),"resume JEPA optimizer counters without stale frame serials");
+}
+
+namespace {
+__global__ void fullMotionCount(vabpnn::JepaOutput* output,AdamGroup* groups,const int* active) {
+    if(*active){++groups[1].steps;output->motionSteps=groups[1].steps;}
+}
+}
+void vabpnnFullJepaMotionStep(VabpnnJepaModel* model,const int* active,cudaStream_t stream) {
+    fullMotionCount<<<1,1,0,stream>>>(model->output,model->groups,active);
+    check(cudaGetLastError(),"count reward-trained JEPA motion step");
 }

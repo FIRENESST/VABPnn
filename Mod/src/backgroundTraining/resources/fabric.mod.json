@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "vabpnn-background-runtime",
+  "version": "1.0.0",
+  "name": "VABPnn isolated background trainer",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "cn.vabpnn.mod.client.capture.BackgroundTraining"
+    ]
+  },
+  "mixins": [
+    "vabpnn.background.mixins.json"
+  ],
+  "depends": {
+    "minecraft": "26.1",
+    "fabricloader": ">=0.19.3",
+    "vabpnn": "*",
+    "vabpnn-telemetry": ">=0.5.0",
+    "fabric-api": "*"
+  }
+}

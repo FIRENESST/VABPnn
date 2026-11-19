@@ -1,7 +1,7 @@
 package cn.vabpnn.mod.client.capture;
 
 import cn.vabpnn.mod.VabpnnMod;
-import java.util.Locale;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
@@ -10,10 +10,10 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 
-/** Local chat feedback and a 2 Hz action bar. Reads only the worker's published CPU counters. */
+/** Local chat feedback polled at 2 Hz. Reads only the worker's published CPU counters. */
 final class InGameFeedback {
-    private static boolean welcomePending,hudEnabled=true;
-    private static long nextHud,flashUntil,pendingSave;
+    private static boolean welcomePending;
+    private static long nextFeedback,pendingSave;
     private static int lastCheckpoint;
     private static boolean wasModel,idleNotice;
     private static long idleNoticeAfter;
@@ -23,52 +23,33 @@ final class InGameFeedback {
 
     static void initialize() {
         ClientPlayConnectionEvents.JOIN.register((handler,sender,client) -> {
-            welcomePending=true; nextHud=0; lastCheckpoint=0;
+            welcomePending=true; nextFeedback=0; lastCheckpoint=0;
         });
         ClientPlayConnectionEvents.DISCONNECT.register((handler,client) -> {
             CaptureController.stopPipeline();
-            welcomePending=false; nextHud=0; flashUntil=0;
+            welcomePending=false; nextFeedback=0;
             wasModel=false; idleNotice=false;
         });
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher,buildContext) ->
-                dispatcher.register(ClientCommands.literal("vabpnn")
-                        .executes(context -> status(context.getSource()))
-                        .then(ClientCommands.literal("status").executes(context -> status(context.getSource())))
-                        .then(ClientCommands.literal("help").executes(context -> help(context.getSource())))
-                        .then(ClientCommands.literal("start").executes(context -> {
-                            post(text(CaptureController.startPipeline()),false); return 1;
-                        }).then(ClientCommands.literal("predict").executes(context -> {
-                            post(text(CaptureController.startPipeline(true)),false);return 1;
-                        })))
-                        .then(ClientCommands.literal("predict")
-                                .executes(context -> predict(true))
-                                .then(ClientCommands.literal("on").executes(context -> predict(true)))
-                                .then(ClientCommands.literal("off").executes(context -> predict(false))))
-                        .then(ClientCommands.literal("stop").executes(context -> {
-                            post(text(CaptureController.stopPipeline() ? "stopped":"already_stopped"),false);
-                            return 1;
-                        }))
-                        .then(ClientCommands.literal("save").executes(context -> {
-                            requestSave(); return 1;
-                        }))
-                        .then(ClientCommands.literal("blocks")
-                                .executes(context -> blockStatus(context.getSource()))
-                                .then(ClientCommands.literal("on").executes(context -> setBlocks(1,-1)))
-                                .then(ClientCommands.literal("off").executes(context -> setBlocks(0,-1)))
-                                .then(ClientCommands.literal("independent").executes(context -> setBlocks(-1,0)))
-                                .then(ClientCommands.literal("cooperate").executes(context -> setBlocks(-1,1)))
-                                .then(ClientCommands.literal("compete").executes(context -> setBlocks(-1,2))))
-                        .then(ClientCommands.literal("memes")
-                                .executes(context -> memeStatus(context.getSource()))
-                                .then(ClientCommands.literal("on").executes(context -> setMemes(1)))
-                                .then(ClientCommands.literal("off").executes(context -> setMemes(0)))
-                                .then(ClientCommands.literal("window")
-                                        .executes(context -> setMemeWindow(!CaptureController.memeWindowVisible()))
-                                        .then(ClientCommands.literal("on").executes(context -> setMemeWindow(true)))
-                                        .then(ClientCommands.literal("off").executes(context -> setMemeWindow(false)))))
-                        .then(ClientCommands.literal("hud")
-                                .then(ClientCommands.literal("on").executes(context -> setHud(true)))
-                                .then(ClientCommands.literal("off").executes(context -> setHud(false))))));
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher,buildContext) -> dispatcher.register(commandTree()));
+    }
+    // This is the entire public surface. Internal diagnostic and training APIs stay available.
+    static LiteralArgumentBuilder<FabricClientCommandSource> commandTree() {
+        return ClientCommands.literal("vabpnn")
+                .executes(context -> controls(context.getSource()))
+                .then(ClientCommands.literal("start").executes(context -> {
+                    post(text(CaptureController.startPipeline()),false);return 1;
+                }))
+                .then(ClientCommands.literal("stop").executes(context -> {
+                    post(text(CaptureController.stopPipeline() ? "stopped":"already_stopped"),false);return 1;
+                }))
+                .then(ClientCommands.literal("selftrain")
+                        .executes(context -> {context.getSource().sendFeedback(labelled(Component.literal(CaptureController.selfTrainingStatus()),false));return 1;})
+                        .then(ClientCommands.literal("on").executes(context -> {post(text(CaptureController.setSelfTraining(true)),false);return 1;}))
+                        .then(ClientCommands.literal("off").executes(context -> {post(text(CaptureController.setSelfTraining(false)),false);return 1;})))
+                .then(ClientCommands.literal("explore")
+                        .executes(context -> {context.getSource().sendFeedback(labelled(Component.literal(CaptureController.explorationStatus()),false));return 1;})
+                        .then(ClientCommands.literal("on").executes(context -> explore(.2f,true)))
+                        .then(ClientCommands.literal("off").executes(context -> explore(0,false))));
     }
     private static Component text(String key,Object... args) {
         return Component.translatable("message.vabpnn."+key,args);
@@ -83,8 +64,6 @@ final class InGameFeedback {
         VabpnnMod.LOGGER.info("{}",output.getString());
         if(client.player!=null) {
             client.gui.getChat().addClientSystemMessage(output);
-            client.gui.setOverlayMessage(output,false);
-            flashUntil=System.nanoTime()+3_000_000_000L;
         }
     }
     static void hotkey(Component message) {
@@ -104,105 +83,16 @@ final class InGameFeedback {
         if(detail.length()>160) detail=detail.substring(0,160)+"…";
         post(text("pipeline_failed",detail),true);
     }
-    private static int predict(boolean enabled) {
-        post(text(CaptureController.setPredictionOnly(enabled)),false);return 1;
+    private static int explore(float probability,boolean bootstrap) {
+        post(Component.literal(CaptureController.setExploration(probability,bootstrap)),false);return 1;
     }
-    private static int setBlocks(int enabled,int mode) {
-        CaptureController.configureBlocks(enabled,mode);
-        String message=enabled==0 ? "高层控制关闭请求已排队":enabled==1 ? "高层控制开启请求已排队":
-                "高层模式请求已排队："+switch(mode) { case 0 -> "独立"; case 2 -> "竞争"; default -> "合作"; };
-        post(Component.literal(message+"；/vabpnn blocks 查看完成帧状态"),false);
-        return 1;
-    }
-    private static int blockStatus(FabricClientCommandSource source) {
-        var s=CaptureController.hierarchyState();
-        source.sendFeedback(labelled(Component.literal(String.format(Locale.ROOT,
-                "高层 %s / %s，半径 %d 块，完成帧 %d；真实示范 %d，策略更新 %d，排名 %d，累计变异 %d，最近处罚 %d",
-                s.enabled()==1 ? "开启":"关闭",s.modeName(),s.radius(),s.frame(),s.samples(),s.updates(),
-                s.rankings(),s.mutations(),s.punished())),false));
-        return 1;
-    }
-    private static int setMemes(int enabled) {
-        CaptureController.configureMemes(enabled);
-        post(Component.literal("模因"+(enabled==1 ? "开启":"关闭")+"请求已排队；/vabpnn memes 查看完成帧状态"),false);
-        return 1;
-    }
-    private static int setMemeWindow(boolean show) {
-        if(!CaptureController.showMemeWindow(show)) { post(text("not_started"),false);return 0; }
-        post(text(show ? "meme_scope_on":"meme_scope_off"),false);return 1;
-    }
-    private static int memeStatus(FabricClientCommandSource source) {
-        var s=CaptureController.memeState();
-        source.sendFeedback(labelled(Component.literal(String.format(Locale.ROOT,
-            "模因 %s，完成帧 %d；本地活跃 %d / 进口活跃 %d，真实示范 %d，投影更新 %d；转发接收 %d，长程选路 %d",
-            s.enabled() ? "开启":"关闭",s.frame(),s.localActive(),s.importActive(),s.samples(),s.updates(),
-            s.receipts(),s.longSelections())),false));
-        source.sendFeedback(labelled(Component.literal("模因传播窗口 "+(CaptureController.memeWindowVisible() ? "显示":"隐藏")
-                +" / 5 Hz；采样帧 "+CaptureController.memeWindowFrame()+"；F6 或 /vabpnn memes window [on|off]"),false));
-        return 1;
-    }
-    private static int setHud(boolean enabled) {
-        hudEnabled=enabled; nextHud=0;
-        post(text(enabled ? "hud_on":"hud_off"),false);
-        return 1;
-    }
-    private static int help(FabricClientCommandSource source) {
-        source.sendFeedback(labelled(text("help",hotkeys()),false));
+    private static int controls(FabricClientCommandSource source) {
         source.sendFeedback(labelled(text("commands"),false));
-        source.sendFeedback(labelled(Component.literal("/vabpnn blocks [on|off|independent|cooperate|compete]；/vabpnn memes [on|off]；/vabpnn memes window [on|off]"),false));
+        source.sendFeedback(labelled(hotkeys(),false));
+        source.sendFeedback(labelled(Component.literal(CaptureController.selfTrainingStatus()),false));
         return 1;
     }
-    private static Component hotkeys() {
-        return CaptureController.feedbackHotkeys();
-    }
-    private static int status(FabricClientCommandSource source) {
-        var state=CaptureController.feedbackState(true);
-        var input=state.input();
-        source.sendFeedback(labelled(text("status.mode",mode(input),state.gate(),
-                text(state.scopeVisible() ? "shown":"hidden")),false));
-        source.sendFeedback(labelled(text("status.actions",input.frame(),
-                names(input.selectedMask(),true),held(source.getClient(),input)),false));
-        var prediction=state.prediction();
-        source.sendFeedback(labelled(text("status.prediction",prediction.frame(),names(prediction.selectedMask(),true),
-                String.format(Locale.ROOT,"%+.3f",prediction.dx()),String.format(Locale.ROOT,"%+.3f",prediction.dy()),
-                String.format(Locale.ROOT,"%+.3f",prediction.wheel())),false));
-        source.sendFeedback(labelled(text("status.decision",state.decisionFrame(),state.requestedK(),
-                names(state.eligibleMask(),true),state.selectedCount(),names(state.lastHumanLabel(),true)),false));
-        var position=CaptureController.positionState();
-        source.sendFeedback(labelled(text("status.position",
-                String.format(Locale.ROOT,"%.3f",position.x()),String.format(Locale.ROOT,"%.3f",position.y()),
-                String.format(Locale.ROOT,"%.3f",position.z()),
-                text(position.valid() ? "position.connected":"position.unavailable"),position.positionSteps()),false));
-        var time=CaptureController.temporalState();
-        source.sendFeedback(labelled(text("status.time",String.format(Locale.ROOT,"%.2f",time.seconds()),
-                String.format(Locale.ROOT,"%.3f",time.minutes()),time.minuteBuckets(),time.minuteSteps(),time.bayesianMotionSteps()),false));
-        var human=state.human();
-        source.sendFeedback(labelled(text("status.mouse",human.leftPress(),human.rightPress(),
-                human.leftRelease(),human.rightRelease()),false));
-        source.sendFeedback(labelled(text("status.gpu",state.processed(),state.dropped(),
-                millis(state.gpuUs()),millis(state.maximumGpuUs()),state.overBudget()),false));
-        source.sendFeedback(labelled(text("status.learning",state.examples(),state.pixelSteps(),
-                state.decisionSteps(),state.jepaSteps(),state.motionSteps(),checkpoint(state)),false));
-        blockStatus(source);
-        memeStatus(source);
-        return 1;
-    }
-    private static Component checkpoint(CaptureController.FeedbackState state) {
-        if(!CaptureController.pipelineAllocated()) return text("checkpoint.not_started");
-        if(pendingSave!=0 && state.savedRequest()<pendingSave) return text("checkpoint.pending");
-        return text("checkpoint."+switch(state.checkpoint()) {
-            case 1 -> "new";
-            case 2 -> "restored";
-            case 3 -> "saved";
-            case -1 -> "failed";
-            default -> "starting";
-        });
-    }
-    private static Component mode(CaptureController.InputState input) {
-        return text(!CaptureController.isStarted() ? "mode.standby":input.predictionOnly() ? "mode.predict":
-                input.modelControl() ? "mode.model":"mode.demo");
-    }
-    private static String millis(long micros) { return micros<=0 ? "--":String.format(Locale.ROOT,"%.2f",micros/1000.0); }
+    private static Component hotkeys() {return CaptureController.feedbackHotkeys();}
     private static Component names(int mask,boolean allActions) {
         var output=Component.empty();
         boolean first=true;
@@ -214,38 +104,9 @@ final class InGameFeedback {
         }
         return first ? text("none"):output;
     }
-    private static Component held(Minecraft client,CaptureController.InputState input) {
-        if(!CaptureController.isStarted()) return text("none");
-        int keys=input.heldKeys(),buttons=input.heldButtons();
-        if(!input.modelControl()) {
-            var human=CaptureController.humanInputState();
-            keys=0;
-            if(client.options.keyUp.isDown()) keys|=1;
-            if(client.options.keyLeft.isDown()) keys|=2;
-            if(client.options.keyDown.isDown()) keys|=4;
-            if(client.options.keyRight.isDown()) keys|=8;
-            if(client.options.keyInventory.isDown()) keys|=16;
-            if(client.options.keyJump.isDown()) keys|=1<<12;
-            if(client.screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen<?>)
-                keys=human.heldKeys();
-            buttons=human.heldButtons();
-        }
-        if(keys==0 && buttons==0) return text("none");
-        var output=Component.empty();
-        if(keys!=0) output.append(names(keys,false));
-        if((buttons&1)!=0) {
-            if(keys!=0) output.append(" + ");
-            output.append(text("action.left"));
-        }
-        if((buttons&2)!=0) {
-            if(keys!=0 || (buttons&1)!=0) output.append(" + ");
-            output.append(text("action.right"));
-        }
-        return output;
-    }
     static void tick(Minecraft client,long now) {
-        if(client.player==null || client.level==null || now<nextHud) return;
-        nextHud=now+500_000_000L;
+        if(client.player==null || client.level==null || now<nextFeedback) return;
+        nextFeedback=now+500_000_000L;
         if(welcomePending) {
             welcomePending=false;
             post(text("welcome",hotkeys()),false);
@@ -269,16 +130,7 @@ final class InGameFeedback {
             idleNotice=true;
             post(text("model_idle",state.gate(),state.requestedK(),names(state.eligibleMask(),true)),false);
         }
-        if(!hudEnabled || now<flashUntil || (client.screen!=null
-                && !(client.screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen<?>))
-                || client.getOverlay()!=null) return;
-        if(state.input().predictionOnly()) {
-            var predicted=state.prediction();
-            client.gui.setOverlayMessage(labelled(text("hud.predict",state.gate(),names(predicted.selectedMask(),true),
-                    String.format(Locale.ROOT,"%+.2f",predicted.dx()),String.format(Locale.ROOT,"%+.2f",predicted.dy()),
-                    millis(state.gpuUs())),false),false);
-        } else client.gui.setOverlayMessage(labelled(text("hud",mode(state.input()),state.gate(),
-                held(client,state.input()),millis(state.gpuUs())),false),false);
+
     }
 }
 

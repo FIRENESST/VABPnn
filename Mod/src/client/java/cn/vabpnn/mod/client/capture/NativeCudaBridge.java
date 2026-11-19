@@ -17,9 +17,12 @@ public final class NativeCudaBridge implements AutoCloseable {
                         long lastProcessed, long memoryBytes, long registrations, int capacity, int phase,
                         long modelBytes) {}
 
-    public NativeCudaBridge(int capacity) {
+    // The one-argument form remains available for compatibility verification of v15.
+    public NativeCudaBridge(int capacity) { this(capacity,false); }
+
+    public NativeCudaBridge(int capacity, boolean pnnJepa) {
         loadLibrary();
-        handle = nStart(capacity);
+        handle = nStart(capacity,pnnJepa);
     }
 
     private static synchronized void loadLibrary() {
@@ -54,6 +57,8 @@ public final class NativeCudaBridge implements AutoCloseable {
     }
     /** Final command only: frame/time/mask/valid and three float bit patterns; buffer is reused. */
     public void readControl(long[] command) { nControl(handle, command); }
+    /** Same completed GPU frame: pre-gate advice, raw rates, axis probabilities/thresholds and masks. */
+    public void readMousePrediction(long[] values) { nMousePrediction(handle,values); }
     public void demonstration(long[] values, double[] motion) { nDemo(handle, values, motion); }
     /** At most 30 Hz; only timestamp/epoch/XYZ. The worker attaches it to the submitted frame. */
     public void position(long nanos,long epoch,double x,double y,double z) { nPosition(handle,nanos,epoch,x,y,z); }
@@ -61,6 +66,11 @@ public final class NativeCudaBridge implements AutoCloseable {
     public void readPosition(long[] status) { nPositionStatus(handle,status); }
     /** Elapsed minutes (double bits), observed minute buckets, minute AdamW steps, frame and Bayesian mouse steps. */
     public void readTime(long[] status) { nTimeStatus(handle,status); }
+    public void memoryContext(long[] values){nLongContext(handle,values);}
+    public void memoryDatabase(Path path){nLongPath(handle,path.toAbsolutePath().toString());}
+    public void configureMemory(boolean enabled){nLongMode(handle,enabled);}
+    public void readLongMemory(long[] values){nLongStatus(handle,values);}
+    public String longMemoryMessage(){return nLongText(handle);}
     public void checkpoint(Path path) { nCheckpoint(handle, path.toAbsolutePath().toString(), false); }
     /** Returns a request serial; completion is published only after the worker finishes saving. */
     public long saveCheckpoint() {
@@ -73,6 +83,21 @@ public final class NativeCudaBridge implements AutoCloseable {
     public void readTraining(long[] status) { nTraining(handle, status); }
     /** Completed GPU frame, validity, eligible mask, learned k, selected count and last human label. */
     public void readDecision(long[] status) { nDecision(handle,status); }
+    public void rewardMode(long epoch,boolean enabled) { rewardMode(epoch,enabled,0,false); }
+    public void rewardMode(long epoch,boolean enabled,float exploration,boolean bootstrap) {
+        nRewardMode(handle,epoch,enabled,exploration,bootstrap,false);
+    }
+    public void rewardMode(long epoch,boolean enabled,float exploration,boolean bootstrap,boolean all){nRewardMode(handle,epoch,enabled,exploration,bootstrap,all);}
+    public void readFullLearning(long[] values){nFullLearningStatus(handle,values);}
+    public void readRewardProposal(long frame,long[] values) { nRewardProposal(handle,frame,values); }
+    public boolean rewardExecution(long epoch,long frame,long captured,int mask,long before,long after,long now,long version) {
+        return nRewardExecution(handle,epoch,frame,captured,mask,before,after,now,version,false,0,0,0);
+    }
+    public boolean rewardExecution(long epoch,long frame,long captured,int mask,long before,long after,long now,long version,double dx,double dy,double wheel){return nRewardExecution(handle,epoch,frame,captured,mask,before,after,now,version,true,(float)dx,(float)dy,(float)wheel);}
+    public boolean reward(long epoch,long id,long start,long end,float credit,long[] frames) {
+        return nReward(handle,epoch,id,start,end,credit,frames);
+    }
+    public void readRewardStatus(long[] values) { nRewardStatus(handle,values); }
     public void configureBlocks(int enabled,int communication) { nBlocks(handle,enabled,communication); }
     public void readBlocks(long[] status) { nBlockStatus(handle,status); }
     public void configureMemes(int enabled) { nMemes(handle,enabled); }
@@ -105,6 +130,18 @@ public final class NativeCudaBridge implements AutoCloseable {
         }
     }
 
+    private static native void nLongContext(long handle,long[] values);
+    private static native void nLongPath(long handle,String path);
+    private static native void nLongMode(long handle,boolean enabled);
+    private static native void nLongStatus(long handle,long[] values);
+    private static native String nLongText(long handle);
+    private static native void nMousePrediction(long handle,long[] values);
+    private static native void nRewardMode(long handle,long epoch,boolean enabled,float exploration,boolean bootstrap,boolean all);
+    private static native void nRewardProposal(long handle,long frame,long[] values);
+    private static native boolean nRewardExecution(long handle,long epoch,long frame,long captured,int mask,long before,long after,long now,long version,boolean actual,float dx,float dy,float wheel);
+    private static native boolean nReward(long handle,long epoch,long id,long start,long end,float credit,long[] frames);
+    private static native void nFullLearningStatus(long handle,long[] values);
+    private static native void nRewardStatus(long handle,long[] values);
     private static native void nMemeScopeEnabled(long handle,boolean enabled,int tile);
     private static native void nMemeScope(long handle,long[] meta,float[] values,int[] discrete,long[] identities);
     private static native void nScopeEnabled(long handle,boolean enabled,int tile);
@@ -123,7 +160,7 @@ public final class NativeCudaBridge implements AutoCloseable {
     private static native void nDecision(long handle,long[] status);
     private static native void nSaveStatus(long handle, long[] status);
     private static native String nCheckpointText(long handle);
-    private static native long nStart(int capacity);
+    private static native long nStart(int capacity,boolean pnnJepa);
     private static native void nConfigure(long handle, int[] textures, int width, int height);
     private static native int nAcquire(long handle);
     private static native boolean nSubmit(long handle, int slot, long fence, long frameId, long captureNanos);

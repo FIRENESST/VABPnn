@@ -2,6 +2,7 @@
 #include "SpikeConnections.h"
 #include "OnlineLearning.h"
 #include "MemeState.h"
+#include "FullSelfLearning.h"
 #include <cub/block/block_radix_sort.cuh>
 #include <cmath>
 #include <cfloat>
@@ -181,7 +182,7 @@ __global__ void prepare(VabpnnGpuFrame frame,BlockPersistent* p,Pending* pending
     if(neighbors) { neighborThreshold/=neighbors; neighborPolarity/=neighbors; neighborScore/=neighbors; }
     feature[13]=neighborThreshold; feature[14]=neighborPolarity; feature[15]=neighborScore;
     for(int d=0;d<BlockFeatures;++d) cache.feature[d]=isfinite(feature[d]) ? fminf(2.0f,fmaxf(-2.0f,feature[d])):0;
-    cache.exploring=!frame.evaluationMode && demo && demo->active && !demo->modelControl && state.examples>=static_cast<std::uint64_t>(config.warmup);
+    cache.exploring=!frame.evaluationMode && demo && demo->active && (!demo->modelControl || frame.selfLearning) && (state.examples>=static_cast<std::uint64_t>(config.warmup) || frame.selfLearning && p->counters.controlUpdates>=static_cast<std::uint64_t>(config.warmup));
     float latent[BlockOutputs]{};
     auto& memeAction=meme.actions[tile];float memeMagnitude=0;
     for(int k=0;k<MemeChannels;++k) {
@@ -500,4 +501,57 @@ void vabpnnResumeBlockModel(VabpnnBlockModel* model,cudaStream_t stream) {
 }
 vabpnn::ModelPart vabpnnBlockCheckpointPart(VabpnnBlockModel* model) {
     return {model->persistent,sizeof(vabpnn::BlockPersistent)};
+}
+
+namespace {
+__global__ void cacheRewardBlocks(const BlockPersistent* p,const Pending* pending,DeviceMemeView meme,BlockRewardObservation* target){
+ const int tile=blockIdx.x,tid=threadIdx.x;auto& o=target[tile];
+ if(tid<BlockFeatures)o.feature[tid]=pending[tile].feature[tid];
+ if(tid<BlockOutputs)o.noise[tid]=pending[tile].noise[tid];
+ if(tid<MemeChannels)o.memeFeature[tid]=meme.actions[tile].feature[tid];
+ if(tid==0){o.exploring=pending[tile].exploring;o.memeActive=meme.actions[tile].active;o.mutation=p->state[tile].mutations;o.observation=meme.observations[tile];}
+}
+__global__ void rewardBlocks(BlockPersistent* p,DeviceMemeView meme,const BlockRewardObservation* const* observations,const int* count,const float* value){
+ const int tile=blockIdx.x,tid=threadIdx.x;if(!p->config.enabled || *count<=0 || !isfinite(*value) || *value==0)return;
+ auto& state=p->state[tile];auto& mp=meme.persistent->policy[tile];
+ __shared__ int n,nM;__shared__ float credit,b1,b2,mb1,mb2;
+ if(tid==0){n=nM=0;for(int j=0;j<*count;++j)if(observations[j][tile].exploring && observations[j][tile].mutation==state.mutations){++n;if(observations[j][tile].memeActive)++nM;}
+  credit=fminf(1,fmaxf(-1,*value-state.baseline));
+  if(n){float step=static_cast<float>(++state.optimizerSteps);b1=1-powf(.9f,step);b2=1-powf(.999f,step);
+   state.baseline=.99f*state.baseline+.01f*(*value);state.score=.95f*state.score+.05f*(*value);state.windowSum+=*value;state.windowSquares+=*value*(*value);state.windowCoverage+=1;++state.windowExamples;++state.examples;
+   atomicAdd(reinterpret_cast<unsigned long long*>(&p->counters.actorUpdates),1ULL);
+   if(nM && meme.persistent->config.enabled){float ms=static_cast<float>(++mp.optimizerSteps);mb1=1-powf(.9f,ms);mb2=1-powf(.999f,ms);}
+   if(nM && meme.persistent->config.enabled)atomicAdd(reinterpret_cast<unsigned long long*>(&meme.persistent->counters.projectionUpdates),1ULL);
+  }
+ }
+ __syncthreads();if(!n)return;
+ for(int at=tid;at<BlockWeights;at+=blockDim.x){int output=at/BlockFeatures,f=at%BlockFeatures;float g=0;
+  for(int j=0;j<*count;++j){const auto& o=observations[j][tile];if(o.exploring && o.mutation==state.mutations)g-=credit*o.noise[output]*o.feature[f]/(p->config.exploration*n);}
+  g=fminf(1,fmaxf(-1,g));float m=state.first[at]=.9f*state.first[at]+.1f*g,v=state.second[at]=.999f*state.second[at]+.001f*g*g;
+  state.weights[at]=fminf(1.5f,fmaxf(-1.5f,state.weights[at]-p->config.learningRate*(m/b1)/(sqrtf(v/b2)+1e-8f)));
+ }
+ if(nM && meme.persistent->config.enabled)for(int at=tid;at<MemeWeights;at+=blockDim.x){int output=at/MemeChannels,f=at%MemeChannels;float g=0;
+  for(int j=0;j<*count;++j){const auto& o=observations[j][tile];if(o.exploring && o.mutation==state.mutations && o.memeActive)g-=credit*o.noise[output]*o.memeFeature[f]/(p->config.exploration*nM);}
+  g=fminf(1,fmaxf(-1,g));float m=mp.first[at]=.9f*mp.first[at]+.1f*g,v=mp.second[at]=.999f*mp.second[at]+.001f*g*g;
+  mp.weights[at]=fminf(1.5f,fmaxf(-1.5f,mp.weights[at]-p->config.learningRate*(m/mb1)/(sqrtf(v/mb2)+1e-8f)));
+ }
+ if(tid==0 && meme.persistent->config.enabled){auto& prototype=meme.persistent->prototypes[tile];
+  const auto& o=observations[0][tile];float alpha=1.f/fminf(256,static_cast<float>(prototype.support+1));
+  for(int f=0;f<MemeContext;++f)prototype.context[f]+=alpha*(o.observation.context[f]-prototype.context[f]);
+  // A reward-tagged visual association, not a fabricated demonstration target.
+  for(int a=0;a<MemeChannels;++a)prototype.evidence[a]+=alpha*((*value)*o.observation.evidence[a]-prototype.evidence[a]);
+  prototype.utility=.98f*prototype.utility+.02f*(*value);prototype.agreement=.98f*prototype.agreement+.02f*(*value>0);
+  prototype.coverage=.98f*prototype.coverage+.02f;prototype.confidence=fminf(1,static_cast<float>(++prototype.support)/64);++prototype.revision;prototype.origin=tile;
+ }
+}
+__global__ void rewardBlockCounters(BlockPersistent* p,const int* count,const float* credit){if(*count>0 && *credit!=0)++p->counters.scoredFrames;}
+}
+void vabpnnCopyBlockRewardObservation(VabpnnBlockModel* model,vabpnn::BlockRewardObservation* target,cudaStream_t stream){
+ cacheRewardBlocks<<<vabpnn::BlockCount,32,0,stream>>>(model->persistent,model->pending,vabpnnMemeModelView(model->memes),target);
+ check(cudaGetLastError(),"cache actual block/meme actor eligibility");
+}
+void vabpnnApplyBlockReward(VabpnnBlockModel* model,const vabpnn::BlockRewardObservation* const* traces,const int* count,const float* credit,cudaStream_t stream){
+ rewardBlocks<<<vabpnn::BlockCount,32,0,stream>>>(model->persistent,vabpnnMemeModelView(model->memes),traces,count,credit);
+ rewardBlockCounters<<<1,1,0,stream>>>(model->persistent,count,credit);
+ vabpnnRankBlockControllers(model,stream);check(cudaGetLastError(),"reward actual block policies and meme projections");
 }

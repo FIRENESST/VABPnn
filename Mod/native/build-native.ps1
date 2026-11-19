@@ -5,7 +5,10 @@ param(
     [string]$JavaRoot = 'C:/Java/JDK26',
     [string]$VsRoot = 'C:/Program Files/Microsoft Visual Studio/18/Community',
     [switch]$TestOperator,
-    [switch]$Benchmark
+    [switch]$TestOnly,
+    [string]$TestPattern="*_test.cu",
+    [switch]$Benchmark,
+    [switch]$BenchmarkSelfTraining
 )
 $ErrorActionPreference = 'Stop'
 $taskProject = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -24,7 +27,7 @@ Push-Location -LiteralPath $taskBuild
 try {
     Write-Output ("Operator source directory: "+$taskOperatorRoot)
     . (Join-Path $taskNativeRoot 'build/toolchain.ps1')
-    . (Join-Path $taskNativeRoot 'build/production.ps1')
+    if(!$TestOnly) {. (Join-Path $taskNativeRoot 'build/production.ps1')}
     . (Join-Path $taskNativeRoot 'build/verification.ps1')
 } finally {
     Pop-Location

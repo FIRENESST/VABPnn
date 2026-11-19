@@ -1,0 +1,41 @@
+plugins { id "net.fabricmc.fabric-loom" version "1.17-SNAPSHOT" }
+version="0.5.0"
+group="cn.vabpnn"
+base { archivesName="vabpnn-telemetry" }
+loom {
+ splitEnvironmentSourceSets()
+ mods { "vabpnn-telemetry" { sourceSet sourceSets.main; sourceSet sourceSets.client } }
+}
+repositories { mavenCentral() }
+sourceSets {
+ scorer { java.srcDir "src/scorer/java" }
+ scorerTest { java.srcDir "src/scorerTest/java"; compileClasspath+=sourceSets.scorer.output; runtimeClasspath+=sourceSets.scorer.output }
+}
+configurations { scorerTestImplementation.extendsFrom scorerImplementation }
+dependencies {
+ minecraft "com.mojang:minecraft:26.1"
+ implementation "net.fabricmc:fabric-loader:0.19.3"
+ implementation "net.fabricmc.fabric-api:fabric-api:0.155.2+26.1.2"
+ scorerImplementation("com.google.code.gson:gson:2.13.2") { transitive=false }
+}
+java { withSourcesJar(); sourceCompatibility=JavaVersion.VERSION_25; targetCompatibility=JavaVersion.VERSION_25 }
+tasks.withType(JavaCompile).configureEach { options.encoding="UTF-8"; options.release=25 }
+tasks.register("scorerJar",Jar) {
+ dependsOn scorerClasses
+ archiveBaseName="vabpnn-scorer"
+ duplicatesStrategy=DuplicatesStrategy.EXCLUDE
+ from sourceSets.scorer.output
+ from { configurations.scorerRuntimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+ exclude "META-INF/*.SF","META-INF/*.RSA","META-INF/*.DSA","module-info.class","META-INF/versions/**/module-info.class"
+ manifest { attributes "Main-Class":"cn.vabpnn.scorer.ScorerApp" }
+}
+tasks.register("scorerTest",JavaExec) { dependsOn scorerTestClasses; classpath=sourceSets.scorerTest.runtimeClasspath; mainClass="cn.vabpnn.scorer.ScorerTest" }
+tasks.named("check") { dependsOn scorerTest }
+tasks.named("build") { dependsOn scorerJar }
+fabricApi { configureTests { createSourceSet=true; modId="vabpnn-telemetry-test"; enableGameTests=false; enableClientGameTests=true; eula=true } }
+tasks.named("runClientGameTest",JavaExec) {
+ systemProperty "vabpnn.scorer.url",providers.gradleProperty("scorerTestEndpoint").getOrElse("http://127.0.0.1:19876")
+ if(providers.gradleProperty("respawnTest").isPresent())systemProperty "vabpnn.test.respawns","true"
+ if(providers.gradleProperty("respawnNotifications").isPresent())systemProperty "vabpnn.test.respawnNotifications","true"
+}
+

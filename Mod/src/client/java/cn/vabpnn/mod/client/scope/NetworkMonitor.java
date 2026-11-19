@@ -16,7 +16,8 @@ import java.util.function.Consumer;
 /** Swing owns painting; Minecraft owns all JNI calls and bridge lifetime. */
 public final class NetworkMonitor implements AutoCloseable {
     public record Status(boolean capturing,boolean modelControl,boolean inputActive,String note,
-                         long appliedFrame,int appliedMask,int heldKeys,int heldButtons,boolean predictionOnly) {
+                         long appliedFrame,int appliedMask,int heldKeys,int heldButtons,boolean predictionOnly,boolean fullLearning) {
+        public Status(boolean capturing,boolean modelControl,boolean inputActive,String note,long frame,int mask,int keys,int buttons,boolean predictionOnly){this(capturing,modelControl,inputActive,note,frame,mask,keys,buttons,predictionOnly,false);}
         public Status(boolean capturing,boolean modelControl,boolean inputActive,String note,long frame,int mask,int keys,int buttons) {
             this(capturing,modelControl,inputActive,note,frame,mask,keys,buttons,false);
         }
@@ -96,14 +97,15 @@ public final class NetworkMonitor implements AutoCloseable {
     public void status(boolean capturing,boolean control,boolean active,String note,long frame,int mask,int keys,int buttons) {
         status(capturing,control,active,note,frame,mask,keys,buttons,false);
     }
-    public void status(boolean capturing,boolean control,boolean active,String note,long frame,int mask,int keys,int buttons,boolean predictionOnly) {
+    public void status(boolean capturing,boolean control,boolean active,String note,long frame,int mask,int keys,int buttons,boolean predictionOnly){status(capturing,control,active,note,frame,mask,keys,buttons,predictionOnly,false);}
+    public void status(boolean capturing,boolean control,boolean active,String note,long frame,int mask,int keys,int buttons,boolean predictionOnly,boolean fullLearning) {
         String normalized=note==null ? "" : note;
         Status previous=status.get();
         if(previous.capturing()==capturing && previous.modelControl()==control
                 && previous.inputActive()==active && previous.appliedFrame()==frame
                 && previous.appliedMask()==mask && previous.heldKeys()==keys
-                && previous.heldButtons()==buttons && previous.predictionOnly()==predictionOnly && previous.note().equals(normalized)) return;
-        status.set(new Status(capturing,control,active,normalized,frame,mask,keys,buttons,predictionOnly));
+                && previous.heldButtons()==buttons && previous.predictionOnly()==predictionOnly && previous.fullLearning()==fullLearning && previous.note().equals(normalized)) return;
+        status.set(new Status(capturing,control,active,normalized,frame,mask,keys,buttons,predictionOnly,fullLearning));
     }
     public void hierarchy(Hierarchy sample) { if(!closed.get()) hierarchy.set(sample); }
     public void motion(MouseMotionTracker.Sample sample) {

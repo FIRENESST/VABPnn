@@ -111,15 +111,22 @@ public final class ScopeRenderTest {
                 
                 state.set(new NetworkMonitor.Status(true,false,false,"仅预测",0,0,0,0,true));
                 motion.set(new MouseMotionTracker.Sample(System.nanoTime(),33_333_333,true,0,0,4.25,-2.5,3.75,-2.5));
+                long adviceNow=System.nanoTime();
+                var advice=new MouseMotionTracker.Suggestion(420,adviceNow,true,true,6.25,-3.5,.2,.18,.63,.62,0,0);
+                motion.set(new MouseMotionTracker.Sample(adviceNow,33_333_333,true,0,0,4.25,-2.5,3.75,-2.5,advice));
                 var predictedOnly=render(panel);
                 motion.set(MouseMotionTracker.EMPTY);
                 var predictionZero=render(panel);
                 int proposed=0,executed=0;
-                for(int y=937;y<959;y++)for(int x=300;x<746;x++)
+                for(int y=946;y<970;y++)for(int x=300;x<746;x++)
                     if(predictedOnly.getRGB(x,y)!=predictionZero.getRGB(x,y))proposed++;
-                for(int y=960;y<984;y++)for(int x=300;x<746;x++)
+                for(int y=972;y<995;y++)for(int x=300;x<746;x++)
                     if(predictedOnly.getRGB(x,y)!=predictionZero.getRGB(x,y))executed++;
                 require(proposed>40 && executed==0,"read-only mode shows proposals while executed deltas remain zero, even with inactive game input");
+                int rawVisible=0;for(int y=889;y<909;y++)for(int x=300;x<746;x++)
+                    if(predictedOnly.getRGB(x,y)!=predictionZero.getRGB(x,y))rawVisible++;
+                require(rawVisible>40,"pre-gate advice remains visible when game input is inactive");
+                ImageIO.write(predictedOnly,"PNG",preview.toFile());
                 panel.setSize(ScopePanel.LOGICAL_WIDTH/2,ScopePanel.LOGICAL_HEIGHT/2);
                 panel.dispatchEvent(new MouseEvent(panel,MouseEvent.MOUSE_CLICKED,System.currentTimeMillis(),0,28,79,1,false));
                 require(tile.get()==6*120+10,"resized panel retains overview hit coordinates");

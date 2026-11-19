@@ -61,6 +61,7 @@ struct JepaOutput {
     std::uint64_t frameId, captureNanos, selfSupervisedSteps, motionSteps;
     float deltaSeconds, rateX, rateY, mouseDx, mouseDy;
     float headRateX,headRateY; // Unconditioned JEPA rates, also cached in demonstration mode.
+    float suggestedDx,suggestedDy; // Valid per-frame JEPA/Bayes recommendation before axis/top-k permissions.
     float predictionLoss, variancePenalty, jepaLoss, gradientNorm, motionLoss;
     int valid, pairReady, motionActive, lastLearningValid;
 };
@@ -78,6 +79,8 @@ struct DeviceJepaView {
     const float* gradients; // Last computed parameter gradients, before norm clipping.
     const float* firstMoment;
     const float* secondMoment;
+    const float* motionInput;
+    const float* motionHidden;
 };
 }
 

@@ -3,7 +3,7 @@ if($TestOperator -or $Benchmark) {
     $taskTestObjects=@(Get-TaskOperatorObjects 'test' $taskTestCode)
 }
 if($TestOperator) {
-    $taskTests=@(Get-ChildItem -LiteralPath (Join-Path $taskNativeRoot 'tests') -File -Filter '*_test.cu' | Sort-Object Name)
+    $taskTests=@(Get-ChildItem -LiteralPath (Join-Path $taskNativeRoot 'tests') -File -Filter $TestPattern | Sort-Object Name)
     if(!$taskTests.Count) {throw 'No CUDA verification programs found'}
     foreach($taskTest in $taskTests) {
         $taskTarget=Join-Path $taskBuild ($taskTest.BaseName+'.exe')
@@ -16,6 +16,8 @@ if($Benchmark) {
     $taskSource=Join-Path $taskNativeRoot 'benchmarks/frame_budget_benchmark.cu'
     $taskTarget=Join-Path $taskBuild 'frame_budget_benchmark.exe'
     $taskProgram=Get-TaskLinkedProgram $taskSource $taskTarget $taskTestCode $taskTestObjects @('bcrypt.lib')
-    & $taskProgram
+    if($BenchmarkSelfTraining) {
+        & $taskProgram --reward-stress --minute-stress --block-stress --meme-stress --meme-scope
+    } else { & $taskProgram }
     if($LASTEXITCODE -ne 0) {throw 'Frame benchmark failed'}
 }

@@ -13,6 +13,8 @@
 #include "MemeState.h"
 #include "model_checkpoint.h"
 #include "action_checkpoint_migration.h"
+#include "reward_bridge.h"
+#include "long_memory_bridge.h"
 #include <cstring>
 #include <cmath>
 #include <array>
@@ -62,12 +64,14 @@ struct TextureSlot {
     bool mapped = false;
     vabpnn::DemoSample demo;
     vabpnn::PlayerPositionSample position;
+    vabpnn::LongMemoryContext longContext;
 };
 struct FrameSlot {
     int state = FRAME_FREE, textureIndex = -1;
     bool hasScope=false,hasMemeScope=false;
     vabpnn::DemoSample demo;
     vabpnn::PlayerPositionSample position;
+    vabpnn::LongMemoryContext longContext;
     unsigned char* rgba = nullptr;
     std::size_t pitch = 0;
     float* rgbNchw = nullptr;
@@ -88,6 +92,7 @@ struct Pool {
 class Pipeline {
 public:
     const int capacity;
+    const bool pnnJepa;
     std::atomic<bool> stop{false}, failed{false};
     std::atomic<std::uint64_t> submitted{0}, copied{0}, processed{0}, skipped{0}, dropped{0},
         lastProcessed{0}, memoryBytes{0}, registrations{0};
@@ -97,6 +102,9 @@ public:
     VabpnnJepaModel* jepaModel = nullptr;
     VabpnnOnlineModel* onlineModel = nullptr;
     VabpnnSpikeModel* spikeModel = nullptr;
+    RewardBridge rewardBridge;
+    LongMemoryBridge longMemoryBridge;
+    std::uint64_t lastSavedRewardSteps=0;
     std::atomic<std::uint64_t> lastGpuUs{0}, maximumGpuUs{0}, budgetOverruns{0};
     vabpnn::SpikeCounters* pendingSpike = nullptr;
     vabpnn::SpikeCounters latestSpike{};
@@ -126,6 +134,7 @@ public:
     bool tracing=false; // Worker-owned enable edge; trace is never checkpointed.
     vabpnn::DemoSample latestDemo;
     vabpnn::PlayerPositionSample latestPosition;
+    vabpnn::LongMemoryContext latestLongContext;
     std::mutex demoMutex, checkpointMutex;
     vabpnn::OnlineOutput* pendingOnline = nullptr;
     vabpnn::JepaOutput* pendingJepa = nullptr;
@@ -139,6 +148,7 @@ public:
     std::uint64_t saveFinishedSerial=0; // Published with checkpoint status under checkpointMutex.
     bool checkpointOpened = false;
     std::uint64_t lastSavedExamples = 0, lastSavedSelfSteps = 0, lastSavedTopology = 0;
+    std::chrono::steady_clock::time_point lastRewardFrameWork=std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point nextSave = std::chrono::steady_clock::now();
     vabpnn::ControlCommand* pendingControl = nullptr; // One pinned host command, worker-owned.
     vabpnn::ControlCommand latestControl{};
@@ -157,7 +167,7 @@ public:
     std::condition_variable wake;
     std::string error, deviceName = "CUDA initializing";
 
-    explicit Pipeline(int count) : capacity(count) {
+    explicit Pipeline(int count, bool usePnnJepa) : capacity(count), pnnJepa(usePnnJepa) {
         if (count < 3 || count > 5) throw std::runtime_error("Pool capacity must be 3..5");
         HGLRC gameContext = wglGetCurrentContext();
         dc = wglGetCurrentDC();
@@ -225,7 +235,7 @@ public:
         texture.fence = fence;
         texture.frameId = id;
         texture.captureNanos = nanos;
-        { std::lock_guard<std::mutex> lock(demoMutex); texture.demo = latestDemo; texture.position=latestPosition; }
+        { std::lock_guard<std::mutex> lock(demoMutex); texture.demo = latestDemo; texture.position=latestPosition; texture.longContext=latestLongContext; }
         texture.state.store(TEX_PENDING, std::memory_order_release);
         ++submitted;
         wake.notify_one();
@@ -249,7 +259,7 @@ public:
         return current ? current->phase.load() : RETIRED;
     }
 private:
-    std::vector<vabpnn::ModelPart> checkpointParts(bool connections=true,bool position=true,bool blocks=true,bool memes=true,bool placement=true,bool minutes=true) {
+    std::vector<vabpnn::ModelPart> checkpointParts(bool connections=true,bool position=true,bool blocks=true,bool memes=true,bool placement=true,bool minutes=true,bool rewards=true,bool memory=true,bool full=true) {
         std::vector<vabpnn::ModelPart> parts;
         parts.push_back({vabpnnMutableNeuronWeights(neuronModel,nullptr),vabpnn::ParameterCount});
         parts.push_back({vabpnnMutableDecisionParameters(decisionModel,nullptr),sizeof(vabpnn::DecisionParameters)});
@@ -270,6 +280,9 @@ private:
         if(memes) parts.push_back(vabpnnMemeCheckpointPart(vabpnnBlockMemeModel(vabpnnSpikeBlockModel(spikeModel))));
         if(placement) parts.push_back(vabpnnSpikePlacementCheckpointPart(spikeModel));
         if(minutes) parts.push_back(vabpnnDecisionMinuteCheckpointPart(decisionModel));
+        if(rewards) parts.push_back(rewardBridge.checkpoint());
+        if(memory) parts.push_back(longMemoryBridge.checkpoint());
+        if(full)parts.push_back(rewardBridge.fullCheckpoint());
         return parts;
     }
     void serviceBlockMode(cudaStream_t stream) {
@@ -298,6 +311,36 @@ private:
         // A held five-frame action must not survive a branch change.
         vabpnnResetBlockHistory(blocks,stream);
     }
+    bool inheritAlphaPnn(const std::wstring& destination) {
+        const auto directory=std::filesystem::path(destination).parent_path();
+        struct Seed { const wchar_t* name; std::uint64_t version; std::size_t count; };
+        const Seed sources[]={
+            {L"release-1.4.2.bin",15,22}, {L"release-1.4.1.bin",12,20}, {L"release-1.4.0.bin",8,19}
+        };
+        for(const auto& seed:sources) {
+            const auto source=(directory/seed.name).wstring();
+            if(!std::filesystem::exists(source))continue;
+            auto version=seed.version;
+            auto count=seed.count;
+            if(version==15) {
+                std::ifstream file(std::filesystem::path(source),std::ios::binary);
+                file.seekg(8);
+                if(!file.read(reinterpret_cast<char*>(&version),sizeof(version)))
+                    throw std::runtime_error("Invalid PNN seed checkpoint header");
+                if(version==13) count=21;
+                else if(version!=15) throw std::runtime_error("Incompatible PNN seed checkpoint");
+            }
+            auto parts=checkpointParts();
+            parts.resize(count);
+            // Same 15-channel ternary PNN, continuous master weights and outgoing CSR edges.
+            // Alpha learns a different representation, so RGB JEPA/action/clock heads start fresh.
+            for(std::size_t i=0;i<parts.size();++i)
+                if(i!=0 && i!=7 && i!=9) parts[i].device=nullptr;
+            return vabpnn::loadModelCheckpoint(source,parts,false,static_cast<int>(version));
+        }
+        return false;
+    }
+
     void serviceCheckpoint() {
         // The path is immutable after configuration. Most worker iterations have
         // no checkpoint work, so avoid path allocation and metadata locks.
@@ -315,11 +358,29 @@ private:
                 checkCuda(cudaDeviceSynchronize(),"wait before checkpoint resume");
                 int migrated=0;
                 auto parts=checkpointParts();
-                bool loaded=vabpnn::loadModelCheckpoint(path,parts,false,8);
-                const auto v7Parts=checkpointParts(true,true,true,true,true,false);
+                bool loaded=false, pnnSeed=false;
+                if(pnnJepa) {
+                    loaded=vabpnn::loadModelCheckpoint(path,parts,false,16);
+                    if(!loaded)pnnSeed=inheritAlphaPnn(path);
+                    if(pnnSeed)vabpnnResumeSpikeModel(spikeModel,nullptr);
+                } else {
+                if(std::filesystem::exists(path)){
+                    std::ifstream header(std::filesystem::path(path),std::ios::binary);char magic[8]{};std::uint64_t version=0;
+                    header.read(magic,8);header.read(reinterpret_cast<char*>(&version),8);
+                    if(version==15)loaded=vabpnn::loadModelCheckpoint(path,parts,false,15);
+                    else if(version==13)loaded=vabpnn::loadModelCheckpoint(path,checkpointParts(true,true,true,true,true,true,true,true,false),false,13);
+                    else throw std::runtime_error("Unsupported model checkpoint; original file retained");
+                }
+                const auto v12Parts=checkpointParts(true,true,true,true,true,true,true,false,false);
+                const auto v12=(std::filesystem::path(path).parent_path()/L"release-1.4.1.bin").wstring();
+                if(!loaded && v12!=path)loaded=vabpnn::loadModelCheckpoint(v12,v12Parts,false,12);
+                const auto v8Parts=checkpointParts(true,true,true,true,true,true,false,false,false);
+                const auto v8=(std::filesystem::path(path).parent_path()/L"release-1.4.0.bin").wstring();
+                if(!loaded && v8!=path) loaded=vabpnn::loadModelCheckpoint(v8,v8Parts,false,8);
+                const auto v7Parts=checkpointParts(true,true,true,true,true,false,false,false,false);
                 const auto v7=(std::filesystem::path(path).parent_path()/L"release-1.3.0.bin").wstring();
                 if(!loaded && v7!=path) loaded=vabpnn::loadModelCheckpoint(v7,v7Parts,false,7);
-                const auto legacyParts=checkpointParts(true,true,true,true,false,false);
+                const auto legacyParts=checkpointParts(true,true,true,true,false,false,false,false,false);
                 const wchar_t* formalNames[]={L"release-1.1.0.bin",L"release-1.0.2.bin",L"release-1.0.1.bin",L"release-1.0.0.bin"};
                 for(const auto name:formalNames) {
                     if(loaded) break;
@@ -333,13 +394,20 @@ private:
                     loaded=vabpnn::loadLegacyActionCheckpoint(previous,legacyParts,version);
                     if(loaded) migrated=version;
                 }
+                }
                 if(loaded) {
                     vabpnnResumeJepaOptimizer(jepaModel,nullptr);
                     vabpnnResumeSpikeModel(spikeModel,nullptr);
+                    rewardBridge.resume(nullptr);
+                    lastSavedRewardSteps=rewardBridge.status().updates;
                 }
+                longMemoryBridge.load(path);
                 checkpointOpened = true; checkpointStatus.store(loaded ? 2 : 1);
                 std::lock_guard<std::mutex> lock(checkpointMutex);
-                checkpointMessage = migrated ? "13-action model and optimizer migrated read-only; Ctrl/Shift initialized neutral"
+                if(pnnJepa) checkpointMessage=loaded ? "Alpha PNN, JEPA, action decoder and optimizers restored"
+                    : pnnSeed ? "Alpha JEPA and decoder initialized; compatible PNN weights and edges inherited read-only"
+                    : "Fresh Alpha PNN, JEPA and action decoder";
+                else checkpointMessage = migrated ? "13-action model and optimizer migrated read-only; Ctrl/Shift initialized neutral"
                     : loaded ? "15-action model, optimizer and connections restored; seconds/minutes timeline ready" : "Fresh model; human demonstration mode";
                 nextSave = std::chrono::steady_clock::now()+std::chrono::seconds(120);
             }
@@ -348,11 +416,14 @@ private:
             { std::lock_guard<std::mutex> lock(controlMutex);
                 changed = latestOnline.examples!=lastSavedExamples || latestJepa.selfSupervisedSteps!=lastSavedSelfSteps
                     || latestSpike.topologyUpdates!=lastSavedTopology; }
+            changed=changed || rewardBridge.status().updates!=lastSavedRewardSteps;
             const bool requested = saveRequested.exchange(false);
             if (requested || (now>=nextSave && changed && checkpointStatus.load()>0)) {
                 saveSerial=saveRequestSerial.load();
                 checkCuda(cudaDeviceSynchronize(),"wait before model checkpoint");
-                vabpnn::saveModelCheckpoint(path,checkpointParts(),8);
+                vabpnn::saveModelCheckpoint(path,checkpointParts(),pnnJepa ? 16 : 15);
+                longMemoryBridge.save();
+                lastSavedRewardSteps=rewardBridge.status().updates;
                 { std::lock_guard<std::mutex> lock(controlMutex);
                     lastSavedExamples=latestOnline.examples; lastSavedSelfSteps=latestJepa.selfSupervisedSteps;
                     lastSavedTopology=latestSpike.topologyUpdates; }
@@ -413,6 +484,8 @@ private:
                     latestOnline = *pendingOnline; latestJepa = *pendingJepa; latestSpike = *pendingSpike;
                     latestBlocks=*pendingBlocks;latestMemes=*pendingMemes; latestBlockFrame=f.frameId;
                 }
+                longMemoryBridge.complete();
+                rewardBridge.complete(f.frameId,!resetTemporal.load() && f.frameId>=minimumControlFrame.load());
                 float milliseconds=0;
                 checkCuda(cudaEventElapsedTime(&milliseconds,f.started,f.processed),"measure GPU operator budget");
                 const auto us=static_cast<std::uint64_t>(milliseconds*1000);
@@ -445,11 +518,18 @@ private:
             }
         }
     }
+    void serviceRewards(cudaStream_t stream){
+        VabpnnGpuFrame owners{};owners.neuronModel=neuronModel;owners.decisionModel=decisionModel;owners.jepaModel=jepaModel;owners.onlineModel=onlineModel;owners.spikeModel=spikeModel;owners.longMemory=longMemoryBridge.model();owners.fullLearning=rewardBridge.fullLearningModel();
+        owners.pnnJepa=pnnJepa;
+        auto before=rewardBridge.bytes();rewardBridge.service(owners,stream);modelBytes.fetch_add(rewardBridge.bytes()-before);
+    }
     void consumeLatest(Pool& p) {
         if (p.processing >= 0) return;
         serviceBlockMode(p.operatorStream);
         serviceMemeMode(p.operatorStream);
+        longMemoryBridge.service(p.operatorStream);
         if (resetTemporal.exchange(false)) {
+            longMemoryBridge.reset(p.operatorStream);
             vabpnnResetDecisionState(decisionModel, p.operatorStream);
             vabpnnResetJepaHistory(jepaModel, p.operatorStream);
             vabpnnResetOnlineHistory(onlineModel, p.operatorStream);
@@ -474,6 +554,16 @@ private:
         VabpnnGpuFrame frame{f.rgba, f.pitch, f.rgbNchw, p.width, p.height,
                             f.frameId, f.captureNanos, p.operatorStream, neuronModel, decisionModel, jepaModel, onlineModel, spikeModel, f.position,
                             f.demo.modelControl != 0};
+        frame.pnnJepa=pnnJepa;
+        frame.selfLearning=rewardBridge.allNetworks() && f.demo.active && f.demo.modelControl;
+        frame.fullLearning=rewardBridge.fullLearningModel();
+        if(frame.selfLearning) {
+            frame.evaluationMode=false;
+            const auto before=rewardBridge.bytes();
+            vabpnnEnableFullLearning(frame.fullLearning,p.operatorStream,pnnJepa);
+            modelBytes.fetch_add(rewardBridge.bytes()-before);
+        }
+        frame.longMemory=longMemoryBridge.model();frame.longMemoryContext=f.longContext;
         const bool traceEnabled=memeScopeEnabled.load();
         if(traceEnabled && !tracing) {
             checkCuda(cudaMemsetAsync(memeTraceDevice,0,sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks,p.operatorStream),"enable viewer relay history");
@@ -483,10 +573,13 @@ private:
         frame.memeTrace=traceEnabled ? memeTraceDevice:nullptr;
         f.state = FRAME_PROCESSING;
         p.processing = latest;
-        checkCuda(cudaEventRecord(f.started,p.operatorStream),"start GPU frame budget");
+        checkCuda(cudaEventRecord(f.started,p.operatorStream),"start GPU frame budget including reward updates");
+        serviceRewards(p.operatorStream);lastRewardFrameWork=std::chrono::steady_clock::now();
         vabpnnSetDemoSample(onlineModel, &f.demo, p.operatorStream);
         vabpnnLaunchOperator(frame);
         checkCuda(cudaGetLastError(), "launch frame operator");
+        longMemoryBridge.enqueue(p.operatorStream);
+        rewardBridge.enqueue(frame,f.demo.active && f.demo.modelControl,p.operatorStream);
         const auto decision = vabpnnDecisionModelView(decisionModel);
         checkCuda(cudaMemcpyAsync(pendingControl, decision.command, sizeof(vabpnn::ControlCommand),
                                  cudaMemcpyDeviceToHost, p.operatorStream), "copy final control command");
@@ -575,6 +668,7 @@ private:
         f.captureNanos = t.captureNanos;
         f.demo = t.demo;
         f.position = t.position;
+        f.longContext=t.longContext;
         f.state = FRAME_COPYING;
         checkCuda(cudaEventRecord(f.copied, p.copyStream), "record copy completion");
     }
@@ -632,6 +726,8 @@ private:
             jepaModel = vabpnnCreateJepaModel(nullptr);
             onlineModel = vabpnnCreateOnlineModel(nullptr);
             spikeModel = vabpnnCreateSpikeModel(nullptr);
+            rewardBridge.initialize();
+            longMemoryBridge.initialize();
             checkCuda(cudaMalloc(reinterpret_cast<void**>(&scopeDevice),sizeof(vabpnn::ScopeTelemetry)),"allocate network telemetry");
             checkCuda(cudaMallocHost(reinterpret_cast<void**>(&scopePending),sizeof(vabpnn::ScopeTelemetry)),"allocate pinned network telemetry");
             checkCuda(cudaMalloc(reinterpret_cast<void**>(&memeScopeDevice),sizeof(vabpnn::MemeScopeTelemetry)),"allocate meme viewer telemetry");
@@ -653,7 +749,7 @@ private:
             std::memset(pendingControl, 0, sizeof(vabpnn::ControlCommand));
             modelBytes.store(vabpnnNeuronModelBytes(neuronModel) + vabpnnDecisionModelBytes(decisionModel)
                 + vabpnnJepaModelBytes(jepaModel) + vabpnnOnlineModelBytes(onlineModel) + vabpnnSpikeModelBytes(spikeModel) + sizeof(vabpnn::ScopeTelemetry)
-                + sizeof(vabpnn::MemeScopeTelemetry) + sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks);
+                + sizeof(vabpnn::MemeScopeTelemetry) + sizeof(vabpnn::MemeRelayTrace)*vabpnn::MemeBlocks + rewardBridge.bytes()+longMemoryBridge.bytes());
             while (!stop.load()) {
                 serviceCheckpoint();
                 auto p = std::atomic_load(&pool);
@@ -665,6 +761,10 @@ private:
                         if (!p->retire.load()) {
                             pollCompletions(*p);
                             serviceCheckpoint();
+                            if(p->processing<0) {
+                                bool configured;{std::lock_guard<std::mutex> lock(checkpointMutex);configured=checkpointOpened || checkpointPath.empty();}
+                                if(configured && std::chrono::steady_clock::now()-lastRewardFrameWork>=std::chrono::milliseconds(250))serviceRewards(p->operatorStream);
+                            }
                             consumeLatest(*p);
                             copyLatest(*p);
                         }
@@ -695,6 +795,8 @@ private:
         if (pendingControl) { cudaFreeHost(pendingControl); pendingControl = nullptr; }
         vabpnnDestroyJepaModel(jepaModel);
         jepaModel = nullptr;
+        longMemoryBridge.close();
+        rewardBridge.close();
         vabpnnDestroyDecisionModel(decisionModel);
         decisionModel = nullptr;
         vabpnnDestroyNeuronModel(neuronModel);
@@ -713,8 +815,8 @@ void throwJava(JNIEnv* env, const std::exception& error) {
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nStart(JNIEnv* env, jclass, jint capacity) {
-    try { return reinterpret_cast<jlong>(new Pipeline(capacity)); }
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nStart(JNIEnv* env, jclass, jint capacity, jboolean pnnJepa) {
+    try { return reinterpret_cast<jlong>(new Pipeline(capacity,pnnJepa==JNI_TRUE)); }
     catch (const std::exception& e) { throwJava(env, e); return 0; }
 }
 extern "C" JNIEXPORT void JNICALL
@@ -1051,4 +1153,116 @@ Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nMemeScope(JNIEnv* env,jclass
         env->SetIntArrayRegion(discrete,0,vabpnn::MemeScopeInts,p->memeScopeLatest.discrete);
         env->SetLongArrayRegion(identities,0,vabpnn::MemeScopeLongs,reinterpret_cast<const jlong*>(p->memeScopeLatest.identities));
     } catch(const std::exception& e) { throwJava(env,e); }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nMousePrediction(JNIEnv* env,jclass,jlong handle,jlongArray target) {
+    try {
+        if(!target || env->GetArrayLength(target)!=17)throw std::invalid_argument("Seventeen-long mouse prediction required");
+        auto* p=from(handle);vabpnn::JepaOutput j;vabpnn::DecisionStatus d;vabpnn::ControlCommand c;
+        {std::lock_guard<std::mutex> lock(p->controlMutex);j=p->latestJepa;d=p->latestDecision;c=p->latestControl;}
+        auto bits=[](float value)->jlong {std::uint32_t raw=0;std::memcpy(&raw,&value,4);return raw;};
+        const bool valid=j.valid && d.valid && c.valid && j.frameId==d.frameId && j.frameId==c.frameId
+            && j.captureNanos==c.captureNanos;
+        const jlong values[17]={static_cast<jlong>(c.frameId),static_cast<jlong>(c.captureNanos),valid ? 1:0,
+            j.pairReady,j.motionActive,bits(j.suggestedDx),bits(j.suggestedDy),bits(j.headRateX),bits(j.headRateY),
+            bits(j.rateX),bits(j.rateY),bits(d.mousePosteriorX),bits(d.mousePosteriorY),
+            bits(d.mouseThresholdX),bits(d.mouseThresholdY),d.eligibleMask&96,c.selectedMask&96};
+        env->SetLongArrayRegion(target,0,17,values);
+    }catch(const std::exception& e){throwJava(env,e);}
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nRewardMode(JNIEnv* env,jclass,jlong handle,jlong epoch,jboolean enabled,
+        jfloat exploration,jboolean bootstrap,jboolean all) {
+    try {if(epoch<=0)throw std::invalid_argument("Positive self-training epoch required");auto* p=from(handle);p->rewardBridge.configure(static_cast<std::uint64_t>(epoch),enabled==JNI_TRUE,exploration,bootstrap==JNI_TRUE,all==JNI_TRUE);p->wake.notify_one();}
+    catch(const std::exception& e){throwJava(env,e);}
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nRewardProposal(JNIEnv* env,jclass,jlong handle,jlong frame,jlongArray target) {
+    try {
+        if(!target || env->GetArrayLength(target)!=10)throw std::invalid_argument("Ten-long reward proposal required");
+        const auto value=from(handle)->rewardBridge.proposal(static_cast<std::uint64_t>(frame));
+        std::uint32_t logBits=0;std::memcpy(&logBits,&value.logProbability,4);
+        jlong result[10]={static_cast<jlong>(value.frameId),static_cast<jlong>(value.captureNanos),static_cast<jlong>(value.epoch),
+            static_cast<jlong>(value.policyVersion),value.mask,value.eligibleMask,value.k,value.count,value.valid,logBits};
+        env->SetLongArrayRegion(target,0,10,result);
+    }catch(const std::exception& e){throwJava(env,e);}
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nRewardExecution(JNIEnv* env,jclass,jlong handle,jlong epoch,jlong frame,
+    jlong captured,jint mask,jlong before,jlong after,jlong now,jlong version,jboolean actual,jfloat dx,jfloat dy,jfloat wheel) {
+    try{return from(handle)->rewardBridge.acknowledge(epoch,frame,captured,mask,before,after,now,version,actual==JNI_TRUE,dx,dy,wheel) ? JNI_TRUE:JNI_FALSE;}
+    catch(const std::exception& e){throwJava(env,e);return JNI_FALSE;}
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nReward(JNIEnv* env,jclass,jlong handle,jlong epoch,jlong id,
+    jlong start,jlong end,jfloat credit,jlongArray frames) {
+    try {
+        if(!frames)throw std::invalid_argument("Executed frame list required");
+        const int count=env->GetArrayLength(frames);
+        if(count<1 || count>vabpnn::RewardCacheSlots)throw std::invalid_argument("Bounded 1..512 frame list required");
+        std::vector<jlong> data(count);env->GetLongArrayRegion(frames,0,count,data.data());
+        if(env->ExceptionCheck())return JNI_FALSE;
+        std::vector<std::uint64_t> values(data.begin(),data.end());auto* p=from(handle);
+        const bool queued=p->rewardBridge.submit(epoch,id,start,end,credit,values);p->wake.notify_one();
+        return queued ? JNI_TRUE:JNI_FALSE;
+    }catch(const std::exception& e){throwJava(env,e);return JNI_FALSE;}
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nRewardStatus(JNIEnv* env,jclass,jlong handle,jlongArray target) {
+    try {
+        if(!target || env->GetArrayLength(target)!=12)throw std::invalid_argument("Twelve-long reward status required");
+        const auto value=from(handle)->rewardBridge.status();std::uint32_t bits=0;std::memcpy(&bits,&value.lastCredit,4);
+        jlong result[12]={static_cast<jlong>(value.epoch),static_cast<jlong>(value.policyVersion),static_cast<jlong>(value.updates),
+            static_cast<jlong>(value.appliedRewards),static_cast<jlong>(value.droppedRewards),static_cast<jlong>(value.lastRewardId),
+            static_cast<jlong>(value.proposals),value.enabled,value.reason,value.lastCount,bits,
+            static_cast<jlong>(value.explorationProposals)};
+        env->SetLongArrayRegion(target,0,12,result);
+    }catch(const std::exception& e){throwJava(env,e);}
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nLongContext(JNIEnv* env,jclass,jlong handle,jlongArray values) {
+    try{if(!values||env->GetArrayLength(values)!=6)throw std::invalid_argument("Six-long memory context required");
+        jlong v[6];env->GetLongArrayRegion(values,0,6,v);if(env->ExceptionCheck())return;
+        auto* p=from(handle);std::lock_guard<std::mutex> lock(p->demoMutex);
+        p->latestLongContext={static_cast<std::uint64_t>(v[0]),static_cast<std::uint64_t>(v[1]),
+            static_cast<std::uint64_t>(v[2]),static_cast<std::uint64_t>(v[3]),
+            static_cast<std::uint64_t>(v[4]),static_cast<std::uint64_t>(v[5])};
+    }catch(const std::exception& e){throwJava(env,e);}
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nLongPath(JNIEnv* env,jclass,jlong handle,jstring value) {
+    try{if(!value)throw std::invalid_argument("Vector database path required");
+        const auto* chars=env->GetStringChars(value,nullptr);if(!chars)return;
+        std::wstring path(reinterpret_cast<const wchar_t*>(chars),env->GetStringLength(value));env->ReleaseStringChars(value,chars);
+        from(handle)->longMemoryBridge.path(path);
+    }catch(const std::exception& e){throwJava(env,e);}
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nLongMode(JNIEnv* env,jclass,jlong handle,jboolean enabled) {
+    try{auto* p=from(handle);p->longMemoryBridge.configure(enabled==JNI_TRUE);p->wake.notify_one();}catch(const std::exception& e){throwJava(env,e);}
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nLongText(JNIEnv* env,jclass,jlong handle) {
+    try{return env->NewStringUTF(from(handle)->longMemoryBridge.text().c_str());}catch(const std::exception& e){throwJava(env,e);return nullptr;}
+}
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nLongStatus(JNIEnv* env,jclass,jlong handle,jlongArray target) {
+    try{if(!target||env->GetArrayLength(target)!=24)throw std::invalid_argument("24-long memory status required");
+        auto* p=from(handle);const auto s=p->longMemoryBridge.status();
+        auto bits=[](float f)->jlong{std::uint32_t b=0;std::memcpy(&b,&f,4);return b;};
+        const jlong values[24]={static_cast<jlong>(s.frame),static_cast<jlong>(s.queries),static_cast<jlong>(s.writes),
+            static_cast<jlong>(s.hits),static_cast<jlong>(s.supervised),static_cast<jlong>(s.steps),static_cast<jlong>(s.revision),
+            s.used,s.capacity,s.retrieved,s.enabled,s.valid,bits(s.seconds),bits(s.minutes),bits(s.ageSeconds),bits(s.ageMinutes),
+            bits(s.similarity),bits(s.readGate),bits(s.writeGate),bits(s.retainGate),bits(s.strength),p->longMemoryBridge.state(),64,8};
+        env->SetLongArrayRegion(target,0,24,values);
+    }catch(const std::exception& e){throwJava(env,e);}
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_cn_vabpnn_mod_client_capture_NativeCudaBridge_nFullLearningStatus(JNIEnv* env,jclass,jlong handle,jlongArray target){
+    try{if(!target || env->GetArrayLength(target)!=14)throw std::invalid_argument("Fourteen full-learning counters required");
+        auto v=from(handle)->rewardBridge.fullStatus();jlong values[14]={static_cast<jlong>(v.updates),static_cast<jlong>(v.secondsSteps),static_cast<jlong>(v.pixelSteps),static_cast<jlong>(v.minuteSteps),static_cast<jlong>(v.positionSteps),static_cast<jlong>(v.bayesSteps),static_cast<jlong>(v.motionSteps),static_cast<jlong>(v.memorySteps),static_cast<jlong>(v.blockSteps),static_cast<jlong>(v.memeSteps),static_cast<jlong>(v.wheelSteps),static_cast<jlong>(v.cached),static_cast<jlong>(v.dropped),static_cast<jlong>(v.bytes)};env->SetLongArrayRegion(target,0,14,values);}
+    catch(const std::exception& error){throwJava(env,error);}
 }

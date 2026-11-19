@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
  */
 public final class VabpnnMod implements ModInitializer {
     public static final String MOD_ID = "vabpnn";
+    public static final String VERSION = "2.0.0-alpha";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     @Override

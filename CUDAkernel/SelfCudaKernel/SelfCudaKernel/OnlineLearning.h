@@ -10,6 +10,7 @@ struct DemoSample {
     std::uint64_t epoch = 0, edge[4]{}, keyHeldNanos[8]{};
     double mouseX = 0, mouseY = 0, wheel = 0;
     // Action mask: keyboard holds plus LeftPress/RightPress while physically held.
+    // pointerMode matches Java/JNI: 0 = ungrabbed GUI, 1 = grabbed world view.
     std::uint32_t heldKeys = 0, active = 0, modelControl = 0, pointerMode = 0;
 };
 struct OnlineOutput {
@@ -34,7 +35,8 @@ void vabpnnSetDemoSample(VabpnnOnlineModel* model, const vabpnn::DemoSample* sam
 // Before the next forward: label the CACHED previous observation with intervening real input.
 void vabpnnLearnPreviousDemo(const VabpnnGpuFrame& frame);
 void vabpnnCacheDemoObservation(const VabpnnGpuFrame& frame);
-void vabpnnOnlineWheel(const VabpnnGpuFrame& frame, vabpnn::MotionProposal* proposal);
+void vabpnnOnlineWheel(const VabpnnGpuFrame& frame, vabpnn::MotionProposal* proposal,
+                      const std::int32_t* actionVotes = nullptr);
 void vabpnnResetOnlineHistory(VabpnnOnlineModel* model, cudaStream_t stream);
 std::size_t vabpnnOnlineCheckpointParts(VabpnnOnlineModel* model, vabpnn::ModelPart* parts);
 
